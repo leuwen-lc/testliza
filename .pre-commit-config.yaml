@@ -1,0 +1,62 @@
+# Adapted from Liza's docs/DEMO.md step 3 for the testliza stack:
+# Java 25 / Spring Boot 4 / Maven (see specs/vision.md).
+#
+# `pre-commit` is a standalone tool (not a project dependency):
+#     pipx install pre-commit      # or: brew install pre-commit
+#     pre-commit install
+#
+# Test + coverage tooling lives in pom.xml (JUnit 5, maven-surefire/-failsafe,
+# jacoco-maven-plugin with a `check` rule, Spotless / google-java-format).
+#
+# The per-commit hooks below are self-contained (no pom.xml required yet). The
+# Maven-backed gates are stage "manual" -- they need pom.xml + ./mvnw and are
+# meant for CI or an explicit  `pre-commit run --hook-stage manual --all-files`.
+
+default_stages: [pre-commit]
+fail_fast: false
+
+repos:
+  # --- language-agnostic hygiene (same intent as the DEMO's set) ---
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-merge-conflict
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+        args: [--markdown-linebreak-ext=md]
+      - id: mixed-line-ending
+        args: [--fix=lf]
+      - id: check-yaml            # application.yml, this file, CI workflows
+      - id: check-added-large-files
+        args: [--maxkb=512]
+      - id: check-case-conflict
+      - id: detect-private-key
+
+  # --- Java formatting: google-java-format, bundled, no Maven needed ---
+  - repo: https://github.com/macisamuele/language-formatters-pre-commit-hooks
+    rev: v2.14.0
+    hooks:
+      - id: pretty-format-java
+        args: [--autofix, --aosp]   # AOSP = 4-space indent; drop --aosp for 2-space Google style
+        files: \.java$
+
+  # --- Maven gates: formatting + correctness + coverage. Off the per-commit
+  #     path (slow, and require pom.xml). Run via:
+  #       pre-commit run --hook-stage manual <id>
+  #     or from CI. Coverage is enforced inside `verify` by the jacoco `check`
+  #     rule configured in pom.xml. ---
+  - repo: local
+    hooks:
+      - id: mvn-spotless-check
+        name: mvn spotless:check (formatting)
+        entry: ./mvnw -q -DskipTests spotless:check
+        language: system
+        pass_filenames: false
+        stages: [manual]
+
+      - id: mvn-verify
+        name: mvn verify (unit + Testcontainers + JaCoCo check)
+        entry: ./mvnw -q verify
+        language: system
+        pass_filenames: false
+        stages: [manual]
