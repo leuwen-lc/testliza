@@ -1,0 +1,7 @@
+spring:
+  application:
+    name: ticketing-platform
+  datasource:
+    url: ${DB_URL:jdbc:postgresql://localhost:5432/ticketing}
+    username: ${DB_USERNAME:ticketing}
+    password: ${DB_PASSWORD:ticketing}

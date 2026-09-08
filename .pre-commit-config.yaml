@@ -37,7 +37,10 @@ repos:
     rev: v2.14.0
     hooks:
       - id: pretty-format-java
-        args: [--autofix, --aosp]   # AOSP = 4-space indent; drop --aosp for 2-space Google style
+        # google-java-formatter-version pinned: the hook's default bundled
+        # 1.22.0 throws NoSuchMethodError against com.sun.tools.javac
+        # internals on JDK 25; 1.28.0 is the first verified-working release.
+        args: [--autofix, --aosp, --google-java-formatter-version=1.28.0]   # AOSP = 4-space indent; drop --aosp for 2-space Google style
         files: \.java$
 
   # --- Maven gates: formatting + correctness + coverage. Off the per-commit
