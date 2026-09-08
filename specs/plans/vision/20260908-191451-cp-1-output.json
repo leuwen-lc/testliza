@@ -1,0 +1,81 @@
+[
+  {
+    "desc": "Create the Maven/Spring Boot 4 project skeleton (pom.xml targeting Java 25, main application class, application.yml) that compiles and boots an empty Spring context",
+    "done_when": "`mvn -q -DskipTests package` succeeds producing `target/ticketing-platform-*.jar`; `TicketingApplicationTests` (a `@SpringBootTest` asserting the application context loads) passes via `mvn -q -Dtest=TicketingApplicationTests test`; `pom.xml` declares Java 25 (`maven.compiler.release=25`), a Spring Boot 4.x parent, and `spring-boot-starter-web`, `spring-boot-starter-jdbc`, `flyway-core`, `flyway-database-postgresql`, `org.postgresql:postgresql`, `spring-boot-starter-test`, `org.testcontainers:postgresql`, `org.testcontainers:junit-jupiter` dependencies plus `maven-failsafe-plugin` bound to the `integration-test`/`verify` phases for `*IT.java` classes; `application.yml` externalises the PostgreSQL datasource URL/username/password via environment-variable placeholders",
+    "scope": "`pom.xml`; `src/main/java/com/ticketing/TicketingApplication.java`; `src/main/resources/application.yml`; `src/test/java/com/ticketing/TicketingApplicationTests.java`. No business logic, no controllers, no persistence code. This task is the sole owner of `pom.xml` and `application.yml` for the whole plan — no later task in this plan touches either file.",
+    "spec_ref": "`specs/vision.md#constraints` (Language / runtime, Framework, Build, Persistence, Config)",
+    "plan_ref": "specs/plans/vision/20260908-191451-cp-1.md",
+    "validation": ["mvn -q -DskipTests package", "mvn -q -Dtest=TicketingApplicationTests test"]
+  },
+  {
+    "desc": "Add the Money value type: an immutable non-negative long minor-unit amount paired with a closed Currency enum (USD, EUR, GBP), rejecting negative amounts at construction",
+    "done_when": "`MoneyTest` passes via `mvn -q -Dtest=MoneyTest test`, asserting: `Money.of(0, USD)` and positive amounts construct successfully; `Money.of(-1, USD)` throws `IllegalArgumentException`; two `Money` instances with equal amount+currency are equal (value semantics); `Money` never exposes or accepts a `double`/`float`",
+    "scope": "`src/main/java/com/ticketing/domain/Currency.java`; `src/main/java/com/ticketing/domain/Money.java`; `src/test/java/com/ticketing/domain/MoneyTest.java`. No HTTP/DB coupling.",
+    "spec_ref": "`specs/vision.md#domain-model` (Money — non-negative integer minor units, currency closed set USD/EUR/GBP, never a floating-point type)",
+    "plan_ref": "specs/plans/vision/20260908-191451-cp-1.md",
+    "validation": ["mvn -q -Dtest=MoneyTest test"],
+    "depends_on": ["0"]
+  },
+  {
+    "desc": "Add the PriceTier enum as the closed set PREMIUM, STANDARD, ECONOMY, ACCESSIBLE, RESTRICTED_VIEW",
+    "done_when": "`PriceTierTest` passes via `mvn -q -Dtest=PriceTierTest test`, asserting `PriceTier.values()` contains exactly the 5 documented constants (PREMIUM, STANDARD, ECONOMY, ACCESSIBLE, RESTRICTED_VIEW), no more, no fewer",
+    "scope": "`src/main/java/com/ticketing/domain/PriceTier.java`; `src/test/java/com/ticketing/domain/PriceTierTest.java`. No parsing/lookup helpers — string-to-enum parsing for the HTTP boundary is owned by Task 7.",
+    "spec_ref": "`specs/vision.md#domain-model` (PriceTier)",
+    "plan_ref": "specs/plans/vision/20260908-191451-cp-1.md",
+    "validation": ["mvn -q -Dtest=PriceTierTest test"],
+    "depends_on": ["0"]
+  },
+  {
+    "desc": "Add a DomainException base class carrying its own HTTP status and a central `@RestControllerAdvice`/`ProblemDetail` exception handler that maps any DomainException to its declared status and maps `org.springframework.dao.DataAccessException` to 503, so no known failure path returns a generic 500",
+    "done_when": "`GlobalExceptionHandlerTest` passes via `mvn -q -Dtest=GlobalExceptionHandlerTest test`, using a throwaway `@RestController` test fixture: throwing a DomainException subclass declared with status 404 yields an HTTP 404 response; a subclass declared with 422 yields 422; a subclass declared with 409 yields 409; throwing a `DataAccessException` yields 503; all responses are `ProblemDetail` JSON bodies",
+    "scope": "`src/main/java/com/ticketing/domain/DomainException.java`; `src/main/java/com/ticketing/web/GlobalExceptionHandler.java`; `src/test/java/com/ticketing/web/GlobalExceptionHandlerTest.java`. No concrete domain exception subclasses beyond test fixtures — endpoint-specific exceptions (e.g. `PriceNotFoundException`) are owned by Task 7.",
+    "spec_ref": "`specs/vision.md#constraints` (Error mapping — central handler maps each typed domain failure to its documented HTTP status code, never a generic 500)",
+    "plan_ref": "specs/plans/vision/20260908-191451-cp-1.md",
+    "validation": ["mvn -q -Dtest=GlobalExceptionHandlerTest test"],
+    "depends_on": ["0"]
+  },
+  {
+    "desc": "Add the PriceChanged domain fact type carrying eventId, tier (PriceTier), amount (Money), and version",
+    "done_when": "`PriceChangedTest` passes via `mvn -q -Dtest=PriceChangedTest test`, asserting a `PriceChanged` instance retains its eventId, tier, amount, and version as constructed, and is an immutable value type (record or final class with no setters)",
+    "scope": "`src/main/java/com/ticketing/domain/event/PriceChanged.java`; `src/test/java/com/ticketing/domain/event/PriceChangedTest.java`. No publishing/consuming wiring — that is owned by Task 6.",
+    "spec_ref": "`specs/vision.md#domain-model` (Domain facts: `PriceChanged(eventId, tier, amountMinor, currency, version)`)",
+    "plan_ref": "specs/plans/vision/20260908-191451-cp-1.md",
+    "validation": ["mvn -q -Dtest=PriceChangedTest test"],
+    "depends_on": ["0", "1", "2"]
+  },
+  {
+    "desc": "Add the price_view projection (Flyway migration + repository) and an idempotent, version-guarded consumer that applies PriceChanged events to it via a single guarded UPSERT",
+    "done_when": "`PriceViewProjectionIT` (Testcontainers PostgreSQL) passes via `mvn -q -Dtest=PriceViewProjectionIT verify`, asserting: (a) the first PriceChanged for a (event, tier) scope inserts a `price_view` row with its amount/currency/version; (b) a subsequent PriceChanged with a higher version updates the row; (c) a PriceChanged with a version less than or equal to the row's current version leaves the row unchanged; (d) redelivering the same PriceChanged event twice is a no-op (idempotent) — all verified against the guarded UPSERT SQL, not application-level compare-then-write",
+    "scope": "`src/main/resources/db/migration/V1__create_price_view.sql`; `src/main/java/com/ticketing/quote/PriceView.java`; `src/main/java/com/ticketing/quote/PriceViewRepository.java`; `src/main/java/com/ticketing/quote/PriceChangedProjector.java`; `src/test/java/com/ticketing/quote/PriceViewProjectionIT.java`. No HTTP controller — that is Task 7. `PriceChangedProjector` listens for `PriceChanged` via Spring's `ApplicationEventPublisher`/`@TransactionalEventListener(phase = AFTER_COMMIT)`/`@Async`, per `specs/vision.md#constraints` option (a); no producer is implemented in this task (pricing writes are out of scope).",
+    "spec_ref": "`specs/vision.md#5-customer-quote-read-model-independent-projection` (requirement 22 projection clause, requirement 23)",
+    "plan_ref": "specs/plans/vision/20260908-191451-cp-1.md",
+    "validation": ["mvn -q -Dtest=PriceViewProjectionIT verify"],
+    "depends_on": ["0", "1", "2", "4"]
+  },
+  {
+    "desc": "Add GET /api/v1/quotes/{event}/{tier}, a public endpoint returning the customer quote from the price_view projection",
+    "done_when": "`QuoteServiceTest` and `QuoteControllerTest` pass via `mvn -q -Dtest=QuoteServiceTest,QuoteControllerTest test`, asserting: (a) happy path — an existing price_view row for (event, tier) returns 200 with body `{event, tier, amountMinor, currency, version}` matching the row; (b) no price_view row for the scope returns 404 via `PriceNotFoundException`; (c) a tier path segment that is not one of the 5 PriceTier constants returns 422 via `UnknownPriceTierException`, parsed once at the boundary (no `PriceTier.valueOf` leaking a raw `IllegalArgumentException` as 400/500); (d) a `PriceViewRepository` failure (simulated via a fake throwing `DataAccessException`) returns 503; all three failure paths use fakes, no DB",
+    "scope": "`src/main/java/com/ticketing/quote/QuoteController.java`; `src/main/java/com/ticketing/quote/QuoteService.java`; `src/main/java/com/ticketing/quote/QuoteResponse.java`; `src/main/java/com/ticketing/quote/PriceNotFoundException.java`; `src/main/java/com/ticketing/quote/UnknownPriceTierException.java`; `src/test/java/com/ticketing/quote/QuoteServiceTest.java`; `src/test/java/com/ticketing/quote/QuoteControllerTest.java`. No Spring Security configuration — the endpoint is unrestricted by default since no authenticated/role-based endpoint exists yet in this scope; full access-level enforcement (requirement 28) is out of scope. The `{event}` path segment is treated as an opaque string key (no format/UUID validation), matching requirement 22's declared status set (404/422/503 only, no 400).",
+    "spec_ref": "`specs/vision.md#5-customer-quote-read-model-independent-projection` (requirement 22)",
+    "plan_ref": "specs/plans/vision/20260908-191451-cp-1.md",
+    "validation": ["mvn -q -Dtest=QuoteServiceTest,QuoteControllerTest test"],
+    "depends_on": ["0", "1", "2", "3", "5"]
+  },
+  {
+    "desc": "Add an end-to-end Testcontainers integration test proving a PriceChanged fact flows through the price_view projection to the GET /api/v1/quotes/{event}/{tier} endpoint",
+    "done_when": "`CustomerQuoteEndToEndIT` passes via `mvn -q -Dtest=CustomerQuoteEndToEndIT verify`, asserting: (a) before any PriceChanged is published, `GET /api/v1/quotes/{event}/{tier}` returns 404; (b) after publishing a PriceChanged for that (event, tier) via `ApplicationEventPublisher` and awaiting projection, the same GET returns 200 with the published amountMinor/currency/version; (c) GET with an unknown tier segment returns 422; run against a real Spring context + Testcontainers PostgreSQL, no mocks",
+    "scope": "`src/test/java/com/ticketing/quote/CustomerQuoteEndToEndIT.java` only. No production code changes.",
+    "spec_ref": "`specs/vision.md#5-customer-quote-read-model-independent-projection` (requirements 22-23, end-to-end)",
+    "plan_ref": "specs/plans/vision/20260908-191451-cp-1.md",
+    "validation": ["mvn -q -Dtest=CustomerQuoteEndToEndIT verify"],
+    "depends_on": ["5", "6"]
+  },
+  {
+    "desc": "Document how to build/run the service and the customer quote endpoint contract in README.md",
+    "done_when": "`README.md` contains a \"Build & run\" section with the mvn build/run commands and a \"Customer quote\" section documenting `GET /api/v1/quotes/{event}/{tier}` — its request path parameters, 200 response shape `{event, tier, amountMinor, currency, version}`, and its 404/422/503 failure statuses",
+    "scope": "`README.md` only. Documentation-only change — no production or test code; the child coder's checkpoint should declare `tdd_not_required` (non-behavioral documentation change).",
+    "spec_ref": "`specs/vision.md#5-customer-quote-read-model-independent-projection` (requirement 22)",
+    "plan_ref": "specs/plans/vision/20260908-191451-cp-1.md",
+    "depends_on": ["0", "6"]
+  }
+]
