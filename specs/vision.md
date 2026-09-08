@@ -8,12 +8,6 @@ event on sale; a customer holds a seat, buys it (taking payment and issuing a
 ticket), or cancels a booking for a refund; and anyone can read published
 availability and prices.
 
-The functional behaviour is reverse-engineered from the reference implementation
-in `~/git/external/ticketing` (24 use cases over 5 subsystems). This vision keeps
-that behaviour and **re-targets the stack to Java 21 + Spring Boot** — the
-reference uses a niche functional-Java runtime (Pragmatica / JBCT / Aether) that
-is explicitly *not* to be reused here.
-
 ## Domain model
 
 - **Event** — `id`, `venue`, `onSaleAt` (ISO-8601 instant), `status` ∈
@@ -36,7 +30,7 @@ is explicitly *not* to be reused here.
 - **Payment** — `bookingId`, `status` ∈ `authorized | captured | voided | refunded`,
   `receiptId`, `Money`.
 - **Ticket** — `id`, `bookingId`, `seatId`, `status` ∈ `issued | invalidated`.
-- **Domain facts** (asynchronous, cross-subsystem):
+- **Domain facts** (cross-subsystem):
   `SeatSold(seatId, eventId, bookingId, version)`,
   `SeatReleased(seatId, eventId, version)`,
   `PriceChanged(eventId, tier, amountMinor, currency, version)`.
@@ -209,9 +203,8 @@ a specific HTTP status — never a generic 500.
 
 ## Constraints
 
-- **Language / runtime**: Java 21 (LTS). **No** dependency on Pragmatica-lite,
-  JBCT, or Aether — this is a plain Spring Boot application.
-- **Framework**: Spring Boot 3.3+ — Spring Web (MVC REST controllers, Jackson
+- **Language / runtime**: Java 25 (LTS).
+- **Framework**: Spring Boot 4+ — Spring Web (MVC REST controllers, Jackson
   JSON), Spring Security for the four access levels (roles `ADMIN`, `OPERATOR`;
   `authenticated`; `public`). The authentication mechanism itself is out of
   scope: assume a resolvable current principal with roles (e.g. a test filter
