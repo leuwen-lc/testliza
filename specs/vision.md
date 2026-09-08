@@ -240,9 +240,18 @@ a specific HTTP status — never a generic 500.
   must prove that no *known* failure path yields `500`.
 - **Tests**: JUnit 5. Every use case has unit tests for validation failure, the
   happy path, and each typed failure, against in-memory fakes (no DB).
-  Integration tests for the guarded SQL and the projections use **Testcontainers**
-  PostgreSQL. Concurrency test: N parallel buys of the same seat yield exactly
-  one `confirmed` booking and N-1 `409`s.
+  Integration tests for the guarded SQL and the projections run against a **real
+  PostgreSQL engine started in-process** — an embedded PostgreSQL (e.g. Zonky
+  `io.zonky.test:embedded-postgres`, pinned via `embedded-postgres-binaries-bom`).
+  A container runtime (Docker / Podman) **must not** be required to run them:
+  they must pass under `mvn verify` in a sandbox with no Docker daemon. Real
+  PostgreSQL semantics must still be exercised (`INSERT ... ON CONFLICT ...
+  RETURNING`, transactional visibility) — H2 / HSQLDB are **not** acceptable
+  substitutes. A Testcontainers-PostgreSQL suite MAY additionally re-verify the
+  same SQL against a containerised server, but only behind an opt-in Maven
+  profile (`-Ptestcontainers`) exercised in CI — never on the default build or on
+  any task's `done_when` path. Concurrency test: N parallel buys of the same seat
+  yield exactly one `confirmed` booking and N-1 `409`s.
 - **Config**: PostgreSQL connection, gateway base URL, sweep cadence, and hold
   TTLs (`15m` / `60m` / `5m` stale window / `1h` orphan age) are all
   externalised in `application.yml`.
@@ -284,6 +293,7 @@ customer principal available):
    `check-hold` reads `NONE`.
 5. **Guards** — blocking a seat (`POST /api/v1/seats/block/{seat}`) then
    attempting a hold or buy on it → `409`; releasing it restores purchases.
-6. **Build gate** — `mvn verify` passes: all unit tests, the Testcontainers
-   integration tests, and the concurrency test (one winner, rest `409`). No
-   known failure path returns HTTP `500`.
+6. **Build gate** — `mvn verify` passes with no container runtime available: all
+   unit tests, the in-process-PostgreSQL integration tests, and the concurrency
+   test (one winner, rest `409`). No known failure path returns HTTP `500`. The
+   optional `-Ptestcontainers` suite is a CI-only add-on, not part of this gate.
