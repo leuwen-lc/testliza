@@ -170,6 +170,65 @@ Décider tôt. Une contrainte d'architecture absente que l'architecte a dû devi
 
 ---
 
+## Passer en mode maintenance
+
+Une fois un premier incrément livré, Liza n'est ni « repartir d'en haut à chaque fois », ni « régénérer tout », ni un one-shot. **Chaque changement = un nouveau goal cadré**, à l'altitude que demande le *delta* — pas celle du système.
+
+### Ce que Liza fait du code existant
+
+- `liza init` est **par-goal**. Relancé sur un repo qui a déjà un `.liza/`, il propose de purger le blackboard, les worktrees et les branches `task/*` du run précédent — **pas** la branche d'intégration ni le code. Un incrément suivant = `liza init` à nouveau, nouveau goal doc, même branche d'intégration (`--branch`).
+- Les agents travaillent **contre** le code existant : *survey* de l'architecture en place, `goal.BaseCommit` = base de diff, l'`integration-analyst` valide `base..HEAD`, les coders **ajoutent des commits**.
+- Liza **ne diffe pas** les fichiers de spec. Chaque `init` est une décomposition fraîche ; c'est le *code* (branche d'intégration) qui est incrémental, pas la planification.
+
+### Quels fichiers on touche
+
+| Fichier | Rôle | En maintenance |
+|---------|------|----------------|
+| goal doc `general-objective` (+ traductions) | intention produit + **contraintes durables** (NFR, garde-fous d'archi) | **édité en place** quand une contrainte change ; référencé par les goals suivants |
+| `GUARDRAILS.md` | règles d'ingénierie permanentes | **édité en place** ; jamais passé à `liza init` (les agents lisent le fichier de la branche) |
+| `specs/goals/<changement>.md` | **un fichier par changement** | **nouveau fichier**, c'est le `--spec` du run |
+| `specs/build/`, `specs/arch-plan/<slug>/`, `specs/plans/` | intermédiaires **produits par Liza** | **régénérés par les runs**, pas édités à la main (au plus un correctif trivial au checkpoint) |
+
+### Choisir l'altitude du changement
+
+| Nature du changement | Entrée |
+|----------------------|--------|
+| Nouvelle capacité, décision produit, refonte | nouveau `general-objective` (ou `functional-spec`) |
+| Comportement fonctionnel résolu / changement purement structurel | `functional-spec` (ou `technical-spec` si l'arch-plan est pré-écrit) |
+| Correctif ciblé, 1–2 fichiers | pas de run MAS → mode Pairing ou à la main |
+
+La course-correction *pendant* un sprint relève de `replan` / `supersede-task` (voir [Modifier la spec en cours de run](#modifier-la-spec-en-cours-de-run)) ; cette section couvre le changement *entre deux goals*.
+
+### Anatomie d'un goal cadré
+
+Un doc qui décrit **un seul changement**. Il référence le système (« changement au service décrit dans le goal doc `general-objective` ») et met l'essentiel des mots sur le **delta** :
+
+1. **Cadre** (1 ligne) — quel système, quelle spec de référence.
+2. **Pourquoi** — la vraie raison (elle conditionne l'acceptation).
+3. **Retiré / Modifié / Inchangé** — la liste **Inchangé** est la clôture de périmètre, pas optionnelle : c'est la barrière que le reviewer fait respecter.
+4. **Décisions forcées** — tranchées ici, pas déléguées.
+5. **Contraintes renversées** — nommer les lignes du goal doc / `GUARDRAILS.md` ; leur MàJ est un livrable, et pour un **renversement** elle se fait **avant** le run (sinon les agents butent sur l'ancienne règle dès la tâche 1).
+6. **Migration & déploiement** — données, config, ordre.
+7. **Critères de succès** — comportementaux + « la garantie X tient toujours » ; « la suite de tests existante passe sans modification » est le meilleur filet de régression.
+8. **Risques / questions ouvertes.**
+
+Passer `/check-liza-input-readiness specs/goals/<changement>.md <entry-point>` avant `init`.
+
+### Exemple — « tout passer par JPA, y compris les updates verrouillés »
+
+Changement de prérequis technique, comportement HTTP inchangé, mais qui **renverse des contraintes durables**.
+
+1. **Éditer en place, avant le run** : `GUARDRAILS.md` (retirer « no ORM » ; reformuler « SQL toujours paramétré » pour JPQL / natif) ; le goal doc `general-objective` section *Contraintes NF*, puces *Persistance* (« passe par JPA/Hibernate, schéma toujours géré par Flyway ») et *Transactions* (nommer le nouveau mécanisme de concurrence). **Ne pas toucher** aux *Règles métier* : la garantie « double-attribution impossible » y est déjà énoncée sans mécanisme. Commit.
+2. **Écrire `specs/goals/jpa-migration.md`** : cadre + pourquoi ; renvoi aux lignes de contrainte déjà mises à jour ; **la décision de concurrence** (verrou pessimiste + isolation, *ou* `@Version` optimiste sans retry, *ou* retry borné) avec confirmation humaine que « N acheteurs → 1 confirmé, N-1 × 409 » tient et acceptation de la régression de perf sous contention ; **Inchangé** (contrats HTTP, ordre de la saga, annulation « remboursement d'abord », projections version-guardées, BFF) ; **régénéré par le run** = l'arch-plan persistance/concurrence + les code plans (les epics/US de `specs/build/` décrivent du fonctionnel inchangé, ils restent valides) ; **critères** = suite de tests existante inchangée passe, test de concurrence 1 gagnant / N-1 × 409 via JPA, plus de SQL brut pour les transitions d'état.
+3. **Lancer** :
+   ```bash
+   /check-liza-input-readiness specs/goals/jpa-migration.md functional-spec
+   liza init --spec specs/goals/jpa-migration.md --entry-point functional-spec
+   # quorum de revue relevé conseillé ; au checkpoint archi le reviewer scrute la garantie anti-double-attribution + l'isolation
+   ```
+
+---
+
 ## Support multi-langage cible
 
 Liza est **agnostique au langage cible**. C'est un orchestrateur — le code applicatif est produit par les agents LLM sous-jacents, dans n'importe quel langage.
