@@ -74,6 +74,36 @@ Amender la spec après le lancement est possible ; le coût dépend de l'avancem
 
 **Cas rencontré.** La spec imposait des tests d'intégration « Testcontainers PostgreSQL » ; le sandbox des agents n'ayant pas de daemon de conteneur, la tâche de projection a fini `BLOCKED` avec un code qui pourtant compilait — son `done_when` (`mvn … verify`) ne pouvait pas s'exécuter. Décision humaine : valider le `done_when` contre un PostgreSQL démarré in-process (embedded-postgres), et reléguer Testcontainers à un profil Maven optionnel réservé à la CI. L'amendement de `specs/vision.md` s'est limité au bullet *Tests* de `## Constraints` et à l'item *Build gate* des *Success Criteria*, **titre `## Constraints` inchangé** pour préserver l'ancre `#constraints` que référencent les tâches. Mais comme la tâche de planning avait déjà engendré ses neuf enfants, le replan n'était plus disponible : rejouer le codage supposerait le parcours supersede / retarget ci-dessus, plus l'ajout de la dépendance embedded-postgres au `pom.xml`. Leçon : décider tôt — idéalement au checkpoint planning → coding — de la façon dont chaque `done_when` s'exécutera réellement dans l'environnement des agents, car après le fan-out le coût d'un changement de stratégie de validation est bien supérieur à celui de l'édition de la spec elle-même.
 
+### Récapitulatif — séquence des revues humaines et fichiers concernés
+
+Séquence des points où le run rend la main à l'humain, pour un run `general-objective` déroulé de bout en bout. `transition` = seule la création des tâches de la phase suivante est gelée, les doer/reviewer continuent le travail déjà réclamable ; `dur` = tous les agents en pause. **Tous** exigent `liza resume` pour repartir — sauf en mode `--auto-resume` (yolo), où ils cessent d'être des gates.
+
+| # | Checkpoint | Déclencheur | Ce que l'humain revoit — fichiers touchables (nature / localisation) | Pour avancer |
+|---|-----------|-------------|---------------------------------------------------------------------|--------------|
+| 0 | Avant le lancement | *(hors run)* | son goal doc (`/check-liza-input-readiness` + relecture par un agent frais) et l'environnement. **goal doc** `specs/goals/<x>.md` ou `<goal>-general-objective.md` · **garde-fous** `GUARDRAILS.md` · **allowlist** `.claude/settings.json` · **toolchain** du container (dépôt Docker) | `liza init` puis spawn des agents |
+| 1 | Fin epic-planning | `PLANNING_COMPLETE` *(transition)* | les epics avant fan-out vers l'écriture des user stories ; décisions taguées `DERIVED` / `ASSUMED`. **epics** `specs/build/<n> - <titre>.md` · **blackboard** `.liza/state.yaml` (sous `liza pause` + `liza validate`) · **goal doc** si un manque apparaît (`ADJUST_SPECS`) | `liza resume`, ou éditer l'epic + `liza replan` (dans la fenêtre) |
+| 2 | Fin user-stories | `MANY_TO_ONE_READY` *(transition)* | la cohérence du lot d'US avant création de la tâche d'architecture. **user stories** `specs/build/<n.m> - <titre>.md` · **blackboard** `.liza/state.yaml` (`liza retarget-dependency` / `supersede-task`) | cf. #1 |
+| 3 | Fin architecture | transition `architecture-to-code-plan` *(transition)* | l'arch-plan avant fan-out vers le code-planning. **arch-plan** `specs/arch-plan/<goal-slug>/<ts>-<task-id>.md` · **blackboard** `.liza/state.yaml` | cf. #1 |
+| 4 | Fin code-planning | `PLANNING_COMPLETE` *(transition)* | les code plans avant fan-out vers le codage ; découpage en scopes, décisions taguées. **code plans** `specs/plans/<goal-slug>/<ts>-<task-id>.md` · **blackboard** `.liza/state.yaml` | cf. #1 |
+| 5 | Codage + intégration | *(aucun checkpoint humain nominal)* | revue `doer ↔ reviewer` uniquement ; la sous-pipeline d'intégration tourne automatiquement quand toutes les tâches de codage sont `MERGED` | — |
+| 6 | Fin de sprint | `SPRINT_COMPLETE` *(dur)* | `sprint_summary`, métriques, anomalies, alignement au goal, le code livré. **goal doc** (`ADJUST_SPECS`) · `GUARDRAILS.md` / `contracts/` (`ADJUST_CONTRACTS`) · **blackboard** `.liza/state.yaml` (`sprint.retrospective`) · **branche d'intégration** en lecture (`git checkout <branche>`, build, tests) | `liza resume` (→ sprint N+1) ou `liza stop` |
+| 7 | Sprints suivants | *(sur `liza resume` depuis #6)* | un sprint N+1 est créé (travail reporté ou nouvel incrément) → la séquence #1–#6 se rejoue selon les phases restantes | — |
+
+**Point d'entrée** : à `functional-spec` la séquence démarre à **#3** (l'architecture) ; à `technical-spec`, à **#4** (le code-planning). Si le goal est assez large pour un fan-out, l'epic-planning et le code-planning ajoutent chacun un checkpoint `PLANNING_COMPLETE` sur le plan « maître » avant la création des tâches par domaine.
+
+**Hors séquence** — peut interrompre le travail des agents à tout moment (tous `—`, dur) :
+
+| Checkpoint | Déclencheur | Ce que l'humain revoit — fichiers touchables |
+|-----------|-------------|---------------------------------------------|
+| Deadline calendaire | `—` | idem #6, forcé par le time-box |
+| Circuit breaker | `—` ; `config.mode = CIRCUIT_BREAKER_TRIPPED` | `.liza/circuit_breaker_report.md` + `.liza/sprint_summary.md` (lecture) → cause racine : `SPEC_FLAW` → **goal doc** · `ARCHITECTURE_FLAW` → `specs/arch-plan/…` · `SCOPE_FLAW` → **goal doc / doc de plan** · `EXTERNAL_DEPENDENCY` → config d'environnement. `liza analyze` puis `liza resume` |
+| Sprint STALLED | `—` ; toutes les tâches non terminales `BLOCKED` | les `blocked_questions` des tâches → trancher : **goal doc / doc de plan** · **blackboard** `.liza/state.yaml` (`liza unblock-task`, `supersede-task`) · config / infra d'exécution |
+| Checkpoint manuel | `liza sprint-checkpoint` | revue mi-parcours à la demande ; fichiers selon l'intention |
+
+**Après toute édition d'un intermédiaire généré** (`specs/build/`, `specs/arch-plan/`, `specs/plans/`) ou du blackboard : `liza replan` (dans la fenêtre du checkpoint) ou `supersede-task` + `retarget-dependency` (après le fan-out) — l'édition seule ne fait rien tant que le graphe de tâches n'est pas régénéré. Les revues **doer ↔ reviewer** intra-paire ne figurent pas ici : ce sont des revues d'agents, jamais de l'humain.
+
+*(Précision : `PLANNING_COMPLETE` est documenté explicitement pour `epic-planner` et `code-planner` ; pour les frontières #2 et #3, le type de checkpoint est déduit de la forme fan-in/fan-out du pipeline et des transitions `liza proceed` nommées.)*
+
 ### Ce que l'humain ne fait PAS
 - Il n'approuve pas chaque tâche individuelle (c'est le reviewer agent)
 - Il ne participe pas aux échanges doer/reviewer
