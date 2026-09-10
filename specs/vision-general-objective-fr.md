@@ -5,8 +5,7 @@
 > énonce le problème, les utilisateurs, le comportement attendu, les règles
 > métier et les contraintes — **pas** la surface HTTP, les formes de
 > requête/réponse, les codes de statut, le schéma de stockage ni le flot de
-> contrôle, qui relèvent de la conception faite par le pipeline. Dérivé de
-> `vision.md`, une rétro-spécification d'une implémentation existante.
+> contrôle, qui relèvent de la conception faite par le pipeline.
 >
 > Version française de `vision-general-objective.md` ; en cas de divergence, la
 > version anglaise fait foi.

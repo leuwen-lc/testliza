@@ -1,5 +1,5 @@
 # Adapted from Liza's docs/DEMO.md step 3 for the testliza stack:
-# Java 25 / Spring Boot 4 / Maven (see specs/vision.md).
+# Java 25 / Spring Boot 4 / Maven (see specs/vision.old.md).
 #
 # `pre-commit` is a standalone tool (not a project dependency):
 #     pipx install pre-commit      # or: brew install pre-commit

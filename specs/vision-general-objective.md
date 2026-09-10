@@ -5,8 +5,7 @@
 > the problem, the users, the desired behaviour, the business rules and the
 > constraints — deliberately **not** the HTTP surface, request/response shapes,
 > status codes, storage schema or control flow, which are for the pipeline to
-> design. Derived from `vision.md`, a retro-specification of an existing
-> implementation.
+> design.
 
 ## Problem & motivation
 
