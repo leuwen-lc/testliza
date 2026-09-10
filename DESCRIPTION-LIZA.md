@@ -194,6 +194,8 @@ Une fois un premier incrément livré, Liza n'est ni « repartir d'en haut à ch
 | `specs/goals/<changement>.md` | **un fichier par changement** | **nouveau fichier**, c'est le `--spec` du run |
 | `specs/build/`, `specs/arch-plan/<slug>/`, `specs/plans/` | intermédiaires **produits par Liza** | **régénérés par les runs**, pas édités à la main (au plus un correctif trivial au checkpoint) |
 
+`liza init --spec` ne prend **qu'un** fichier : le goal cadré. Le goal doc `general-objective` (édité en place et commité à l'étape précédente) n'est **pas** re-soumis et Liza ne le « retrouve » pas comme second goal — les agents le lisent parce que le goal cadré le **référence** explicitement, et `GUARDRAILS.md` est lu par tous les agents via le hook d'init, sans référence. Les traductions (`-fr.md`…) sont pour les humains ; Liza travaille sur la version canonique.
+
 ### Choisir l'altitude du changement
 
 | Nature du changement | Entrée |
