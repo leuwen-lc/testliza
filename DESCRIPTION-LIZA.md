@@ -128,6 +128,48 @@ Les règles propres à **ton** organisation ne sont dans aucun corpus d'entraîn
 
 ---
 
+## Spécifications d'architecture : où et comment les introduire
+
+« Spécifications d'architecture » recouvre trois choses de nature différente. Chacune a son emplacement et son altitude — les confondre revient soit à sur-spécifier le goal document (et retirer à l'architecte des décisions qu'il ferait mieux), soit à laisser une contrainte réelle se faire deviner.
+
+### 1. Les contraintes qui *bornent* l'architecte → le goal document
+
+Langage, frameworks imposés, base de données, patterns obligatoires, NFR (perf, sécurité, observabilité) : ce sont des **décisions humaines**, pas du design. Le skill `goal-writing` l'affirme explicitement — une **pile héritée**, une **borne de compatibilité**, un **garde-fou d'ingénierie** (« toutes les requêtes passent par la couche repository ») ne sont pas du détail d'implémentation : l'humain les possède **à toute altitude**, et les NFR ne sont jamais ce qu'on retire au nom du « lean ».
+
+- **Où** : sections *Solution Overview* / *Contraintes non fonctionnelles* du goal document.
+- **Altitude** : `general-objective` ou `functional-spec`.
+- **Formuler comme borne, pas comme design** :
+  - ✅ « doit tourner sur Java 25 + Spring Boot 4 + PostgreSQL 16 » (borne héritée)
+  - ✅ « toute mutation d'état passe par un `UPDATE` gardé à une seule instruction ; pas de JPA » (garde-fou)
+  - ✅ « architecture en slices : un slice = un cas d'usage, aucun couplage direct inter-slice » (règle structurelle)
+  - ❌ le découpage en modules, les interfaces entre eux, le diagramme de composants, le data flow — **c'est le livrable de l'architecte** ; l'écrire dans le goal doc fige la décision avec l'autorité de l'humain et personne ne la rouvre.
+
+### 2. Les règles permanentes liant *tous* les agents → `GUARDRAILS.md`
+
+Fichier à la racine du projet, édité par l'humain **avant `liza init`** (ou entre sprints). Diffère du goal document : celui-ci décrit *ce goal* ; `GUARDRAILS.md` décrit les règles qui s'appliquent à **tout ce que les agents font dans ce dépôt**, quelle que soit la tâche.
+
+- **Système de tiers** (repris de `contracts/CORE.md`) : **Tier 0** inviolable → halt immédiat (RESET) ; **Tier 1** hard → waiver explicite avec justification ; **Tier 2** defaults forts.
+- **Mécanique** : le hook `enforce-init.sh` **bloque toute action** (Write, Edit, Bash…) tant que l'agent n'a pas lu `GUARDRAILS.md` — enforcement mécanique, pas seulement du prompt.
+- **Contenu type** : « clean code / SOLID obligatoire », « pas de dépendance circulaire entre modules », « `booking` et `pricing` ne se référencent jamais directement », « toute API publique a un test de contrat », conventions de commit et de nommage, « pas de secret en clair ».
+
+### 3. La conception d'architecture elle-même → livrable de la phase architecture, ou input en `technical-spec`
+
+| En main | Entry point | Qui produit l'arch-plan | Où vont les contraintes du point 1 |
+|---------|-------------|-------------------------|------------------------------------|
+| Problème + contraintes | `general-objective` | Liza : epic → US → **architecture** | goal doc + `GUARDRAILS.md` |
+| Comportement fonctionnel résolu, archi à faire | `functional-spec` | Liza : **architecture** (saute epic/US) | idem |
+| Architecture déjà arrêtée | `technical-spec` | **l'humain** (écrit l'arch-plan) | dans le doc `technical-spec` : composants, interfaces, migrations, stratégie de test |
+
+Format **`arch-plan`** (produit par l'agent `architect`, ou fourni par l'humain en `technical-spec`) : *Composants* (responsabilité, frontières, décisions + rationale), *Interfaces* (contrat, direction, invariants), *Data Flow*, *Cross-Cutting* (erreurs, observabilité, config, test), *Décomposition* en scopes + table de couverture *spec → scope*. Chemin : `specs/arch-plan/<goal-slug>/<timestamp>-<task-id>.md`.
+
+En `general-objective` / `functional-spec`, l'`architect` produit ce document, l'`architecture-reviewer` le valide par verdict liant, et le checkpoint `architecture-to-code-plan` laisse l'humain le relire et l'amender avant le fan-out coding (`liza resume` pour accepter, ou éditer le plan + `liza replan` dans la fenêtre).
+
+### Timing
+
+Décider tôt. Une contrainte d'architecture absente que l'architecte a dû deviner devient coûteuse à corriger après le fan-out coding (`supersede-task` + `retarget-dependency` — même schéma que le cas décrit plus haut en « Modifier la spec en cours de run »). Si l'architecture est déjà arrêtée, l'écrire et entrer en `technical-spec` ; sinon, poser les **bornes** dans le goal document et `GUARDRAILS.md`, et laisser la phase architecture de Liza produire le plan, validé au checkpoint.
+
+---
+
 ## Support multi-langage cible
 
 Liza est **agnostique au langage cible**. C'est un orchestrateur — le code applicatif est produit par les agents LLM sous-jacents, dans n'importe quel langage.

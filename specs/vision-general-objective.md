@@ -50,7 +50,7 @@ purchase and cancellation:
 
 - The identity provider's own administration and user lifecycle — accounts,
   registration, password reset, email verification, MFA policy, all managed in
-  Keycloak — and the choice of OIDC client library and token-handling pattern.
+  Keycloak — and the choice of OIDC client library.
 - Seat-scoped pricing (prices are per tier only), discounts, promo codes,
   multi-seat / cart orders, waitlists, partial-value refunds.
 - Seat maps and rendering; venue modelling beyond a free-text venue name and
@@ -60,6 +60,9 @@ purchase and cancellation:
 - Guaranteed delivery, content or channels for notifications.
 - Reporting, analytics and financial reconciliation beyond "refunded in full".
 - Currency conversion (an event's prices are in a single currency).
+- Edge abuse protection — rate limiting, WAF, bot / brute-force defence — handled
+  by the gateway / infrastructure and the identity provider, not by this
+  application.
 
 ## Domain concepts
 
@@ -180,14 +183,15 @@ not components, routes, layouts or a specific frontend framework.
 - **Customer app** (signed in) — holding, buying, and managing bookings.
 - Anonymous browsing is always available; signing in is required only to hold,
   buy or cancel.
-- Signing in = redirect to the identity provider's own hosted login (Keycloak);
-  the app has no password field and never sees the customer's credentials. It
-  returns with a validated token from which identity and role are read.
+- Signing in = redirect (through the BFF) to the identity provider's own hosted
+  login (Keycloak); the app has no password field and never sees the customer's
+  credentials. The browser comes back to a same-origin session — identity and
+  role are resolved server-side.
 - Role-gated navigation: a signed-in customer sees only customer screens. Any
   attempt to reach an organiser/operator screen (including by typing a URL) lands
   on a plain "you do not have access" screen. UI gating is convenience only — the
   API stays the enforcement point.
-- Token / session expiry mid-task → the token is refreshed silently where
+- Session expiry mid-task → the BFF refreshes its tokens silently where
   possible; otherwise the customer is sent back to the provider to sign in again
   and returned to where they were, with in-progress context (selected event/seat,
   live hold) preserved if still valid. Nothing is silently lost.
@@ -339,10 +343,16 @@ not components, routes, layouts or a specific frontend framework.
     only on the payment provider's own secure surface, never in the app.
   - The API is the sole enforcement point for access and business rules; UI
     checks are convenience only and are assumed bypassable.
-  - OIDC tokens are held so they are not reachable by injected script; a stolen
-    token's blast radius is bounded by a short access-token lifetime and
-    server-side validation, and step-up re-authentication before the buy step is
-    acceptable if required.
+  - No OIDC token is ever in the browser: the app holds only an opaque
+    `HttpOnly` `Secure` `SameSite` session cookie issued by the BFF, so an XSS
+    cannot exfiltrate a portable credential. Token refresh happens server-side in
+    the BFF. Step-up re-authentication before the buy step is acceptable if
+    required.
+  - The app serves a **strict Content-Security-Policy** (no `unsafe-inline` /
+    `unsafe-eval`; sources explicitly listed) and the standard security headers
+    (HSTS, `nosniff`, `frame-ancestors 'none'`, `Referrer-Policy`).
+  - `localStorage` / `sessionStorage` are never used for anything
+    identity-related; the session is the cookie and nothing else.
   - All traffic over TLS; the app refuses to run over plaintext.
   - Only the customer data a screen needs is fetched; nothing sensitive is
     written to durable local storage.
@@ -393,22 +403,44 @@ not components, routes, layouts or a specific frontend framework.
   AA audit.
 - A signed-in customer cannot reach an organiser or operator screen; a direct URL
   attempt shows "you do not have access".
-- An expired token is refreshed without the customer noticing where possible;
-  when a fresh sign-in is needed, the customer returns to the same screen with
-  their selection and any live hold intact.
+- An expired session is refreshed by the BFF without the customer noticing where
+  possible; when a fresh sign-in is needed, the customer returns to the same
+  screen with their selection and any live hold intact.
+- The delivered UI serves a strict Content-Security-Policy and the standard
+  security headers, and holds no OIDC token — only an opaque session cookie from
+  the BFF.
 
 ## Non-functional constraints
 
-- **Runtime / stack**: Java 25 (LTS), Spring Boot 4+, PostgreSQL 16+.
+- **Runtime / stack**: Java 25 (LTS), Spring Boot 4+, PostgreSQL 18+.
+- **Architecture style**: a conventional **layered Spring Boot** service —
+  HTTP controllers → application services (the transaction boundary) →
+  data-access repositories. DTOs at the HTTP boundary, domain types inside.
+  Nothing a mainstream Java developer would have to learn to read the code:
+  no reactive / WebFlux, no event sourcing, no CQRS deployed as separate
+  services, no hexagonal / ports-and-adapters ceremony, no code generation or
+  annotation-processor magic. Package-by-feature is fine; the internal shape
+  stays layered.
 - **Authentication & identity**: delegated to an external OIDC provider
-  (Keycloak). The service is an OIDC relying party / resource server — it
-  validates tokens and derives identity and roles from their claims; it
-  implements no login screen, registration, password handling or session-secret
-  storage. A test profile may substitute a header-based principal for local runs
-  and tests. All traffic over TLS.
+  (Keycloak). The browser app authenticates through a **backend-for-frontend
+  (BFF)** built into the backend module: the Authorization Code + PKCE flow runs
+  server-side, OIDC tokens stay server-side, and the browser holds only an
+  opaque `HttpOnly` `Secure` `SameSite` session cookie — **no token in the
+  browser**. The backend validates tokens and derives identity and roles from
+  their claims; it implements no login screen, registration or password
+  handling. Session state is held in memory (single-instance MVP), swappable for
+  an external store (e.g. Redis) on scale-out. A test profile may substitute a
+  header-based principal for local runs and tests. All traffic over TLS.
 - **Persistence guardrail**: all state transitions are hand-written,
   single-statement guarded SQL (no ORM / JPA); schema changes are
   version-controlled migrations.
+- **Transactions**: one explicit transaction boundary per use case, at the
+  service layer; the guarded single-statement writes are the concurrency
+  mechanism — no application-level locks, no `SERIALIZABLE` retry loops.
+- **Read-model deployment**: the availability and customer-quote projections are
+  tables in the **same database and application**, kept fresh by in-process
+  event listeners (or a transactional outbox) — not a separate service, message
+  broker or datastore.
 - **Money**: integer minor units end to end; no floating-point anywhere in
   pricing or payments.
 - **Failure reporting**: every known failure maps to a specific, typed outcome
@@ -419,9 +451,41 @@ not components, routes, layouts or a specific frontend framework.
   for tests and local runs.
 - **Configuration**: database connection, gateway location, sweep cadence and all
   hold-timing values are externally configurable.
+- **Observability**: structured logging with a correlation id per request;
+  health / readiness endpoints; basic metrics (Micrometer). Enough to operate —
+  no APM product mandated.
+- **Build & run**: one Maven module, one deployable jar, one process. No
+  orchestration assumption beyond "a container plus a PostgreSQL".
 - **Testing**: each use case unit-tests the happy path and every typed failure;
   integration tests cover the guarded SQL and the projections against a real
   PostgreSQL; a concurrency test proves one-winner-per-seat.
+- **Security** — the service must guarantee, and a pre-release review must
+  confirm:
+  - **Object access (anti-IDOR, guaranteed)**: every reference to a booking,
+    hold or receipt is authorisation-checked against the authenticated identity
+    (the token `sub`) and/or the required role, in the same transaction as the
+    access. A valid id belonging to another customer never returns its data
+    (`403` / `404`, never the content).
+  - **SQL injection**: 100% of SQL is parameterised; no query is built by
+    concatenating or interpolating request data; a dynamic fragment (column,
+    sort order) goes through a hard-coded allowlist.
+  - **Mass assignment**: request DTOs are explicit; server-controlled fields
+    (identity, price, tier, status, timestamps, versions) are never read from
+    the request body.
+  - **XSS**: all output is contextually encoded; no untrusted data is rendered as
+    raw HTML / JS.
+  - **CSRF**: the BFF session rides in a cookie, so every state-changing request
+    requires CSRF protection — Spring Security CSRF tokens plus `SameSite` on the
+    session cookie (`Strict` for sensitive endpoints).
+  - **Headers**: HSTS, `X-Content-Type-Options: nosniff`, frame denial, minimal
+    explicit CORS. The strict Content-Security-Policy is a UI requirement (see
+    the customer-facing UI section).
+  - **Secrets**: never in code, logs or the client; injected by configuration
+    only.
+  - **Dependencies**: known-CVE scanning at build time; no dependency with an
+    unaddressed critical vulnerability at release.
+  - **Database account**: the application connects with a least-privilege account
+    — DML on its own tables, no runtime DDL, no superuser.
 
 ## Success criteria
 
@@ -445,6 +509,10 @@ not components, routes, layouts or a specific frontend framework.
   token lacks that role is refused as permission-denied; a missing or expired
   token is treated as public (or refused, for a protected operation) — never as a
   server error.
+- A pre-release security review against **OWASP ASVS level 1** (or the OWASP
+  Top 10) leaves no critical finding open: a valid id for another customer's
+  booking never returns its data; no input can alter a SQL query; the security
+  headers (and the UI's CSP) are present and strict.
 - No known failure path returns a generic server error.
 
 ## Risks, assumptions & open questions

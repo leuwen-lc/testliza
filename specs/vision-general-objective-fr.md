@@ -61,7 +61,7 @@ l'achat puis à l'annulation d'un billet :
 - L'administration de l'IdP et le cycle de vie des utilisateurs — comptes,
   inscription, réinitialisation de mot de passe, vérification d'e-mail, politique
   MFA, tout géré dans Keycloak — ainsi que le choix de la bibliothèque cliente
-  OIDC et du pattern de gestion des jetons.
+  OIDC.
 - La tarification par siège (les prix sont par palier uniquement), les remises,
   les codes promo, les commandes multi-sièges / panier, les listes d'attente,
   les remboursements partiels.
@@ -73,6 +73,9 @@ l'achat puis à l'annulation d'un billet :
 - Le reporting, l'analytique et le rapprochement financier au-delà de
   « remboursé intégralement ».
 - La conversion de devises (les prix d'un événement sont dans une seule devise).
+- La protection anti-abus au bord — rate limiting, WAF, défense anti-bot /
+  anti-bruteforce — assurée par la passerelle / l'infrastructure et par l'IdP,
+  pas par cette application.
 
 ## Concepts métier
 
@@ -204,15 +207,15 @@ particulier.
 - **Espace client** (connecté) — pré-réserver, acheter, gérer ses réservations.
 - La navigation anonyme est toujours possible ; la connexion n'est requise que
   pour pré-réserver, acheter ou annuler.
-- Se connecter = redirection vers la page de login hébergée par l'IdP
-  (Keycloak) ; l'application n'a aucun champ mot de passe et ne voit jamais les
-  identifiants du client. Elle revient avec un jeton validé d'où l'identité et le
-  rôle sont lus.
+- Se connecter = redirection (via le BFF) vers la page de login hébergée par
+  l'IdP (Keycloak) ; l'application n'a aucun champ mot de passe et ne voit jamais
+  les identifiants du client. Le navigateur revient sur une session same-origin —
+  l'identité et le rôle sont résolus côté serveur.
 - Navigation filtrée par rôle : un client connecté ne voit que les écrans client.
   Toute tentative d'atteindre un écran organisateur/opérateur (y compris en
   saisissant une URL) aboutit sur un écran sobre « vous n'avez pas accès ». Le
   filtrage de l'IHM est du confort — l'API reste le point d'application.
-- Expiration du jeton / de la session en cours de tâche → le jeton est rafraîchi
+- Expiration de session en cours de tâche → le BFF rafraîchit ses jetons
   silencieusement quand c'est possible ; sinon le client est renvoyé vers l'IdP
   pour se reconnecter puis ramené là où il était, avec le contexte en cours
   (événement/siège sélectionné, pré-réservation vivante) préservé s'il est encore
@@ -392,11 +395,18 @@ particulier.
   - L'API est le seul point d'application des contrôles d'accès et des règles
     métier ; les vérifications de l'IHM sont du confort et sont supposées
     contournables.
-  - Les jetons OIDC sont conservés de manière à ne pas être accessibles à un
-    script injecté ; le rayon d'impact d'un jeton volé est borné par une durée de
-    vie d'access token courte et une validation côté serveur, et une
+  - Aucun jeton OIDC n'est jamais dans le navigateur : l'application ne détient
+    qu'un cookie de session opaque `HttpOnly` `Secure` `SameSite` émis par le
+    BFF, de sorte qu'un XSS ne peut pas exfiltrer d'identifiant portable. Le
+    rafraîchissement des jetons se fait côté serveur dans le BFF. Une
     ré-authentification renforcée (step-up) avant l'étape d'achat est acceptable
     si nécessaire.
+  - L'application sert une **Content-Security-Policy stricte** (pas de
+    `unsafe-inline` / `unsafe-eval` ; sources explicitement listées) et les
+    en-têtes de sécurité standard (HSTS, `nosniff`, `frame-ancestors 'none'`,
+    `Referrer-Policy`).
+  - `localStorage` / `sessionStorage` ne sont jamais utilisés pour quoi que ce
+    soit lié à l'identité ; la session est le cookie et rien d'autre.
   - Tout le trafic en TLS ; l'application refuse de fonctionner en clair.
   - Seules les données client dont un écran a besoin sont récupérées ; rien de
     sensible n'est écrit dans un stockage local durable.
@@ -458,23 +468,47 @@ particulier.
   WCAG 2.1 AA.
 - Un client connecté ne peut pas atteindre un écran organisateur ou opérateur ;
   une tentative d'URL directe affiche « vous n'avez pas accès ».
-- Un jeton expiré est rafraîchi sans que le client s'en aperçoive quand c'est
-  possible ; quand une nouvelle connexion est nécessaire, le client revient sur
-  le même écran avec sa sélection et toute pré-réservation vivante intactes.
+- Une session expirée est rafraîchie par le BFF sans que le client s'en
+  aperçoive quand c'est possible ; quand une nouvelle connexion est nécessaire,
+  le client revient sur le même écran avec sa sélection et toute pré-réservation
+  vivante intactes.
+- L'IHM livrée sert une Content-Security-Policy stricte et les en-têtes de
+  sécurité standard, et ne détient aucun jeton OIDC — seulement un cookie de
+  session opaque émis par le BFF.
 
 ## Contraintes non fonctionnelles
 
-- **Runtime / pile** : Java 25 (LTS), Spring Boot 4+, PostgreSQL 16+.
+- **Runtime / pile** : Java 25 (LTS), Spring Boot 4+, PostgreSQL 18+.
+- **Style d'architecture** : un service Spring Boot **en couches** classique —
+  contrôleurs HTTP → services applicatifs (la frontière transactionnelle) →
+  dépôts d'accès aux données. DTO à la frontière HTTP, types domaine à
+  l'intérieur. Rien qu'un développeur Java courant devrait apprendre pour lire
+  le code : pas de réactif / WebFlux, pas d'event sourcing, pas de CQRS déployé
+  en services séparés, pas de cérémonie hexagonale / ports-adapters, pas de
+  génération de code ni de magie d'annotation-processor. Organisation
+  *package-by-feature* acceptée ; la forme interne reste en couches.
 - **Authentification et identité** : déléguées à un IdP externe conforme OIDC
-  (Keycloak). Le service est un Relying Party / resource server OIDC — il valide
-  les jetons et en dérive l'identité et les rôles à partir des claims ; il
-  n'implémente ni écran de login, ni inscription, ni gestion de mot de passe, ni
-  stockage de secret de session. Un profil de test peut substituer un principal
-  fondé sur des en-têtes pour l'exécution locale et les tests. Tout le trafic en
-  TLS.
+  (Keycloak). L'application navigateur s'authentifie via un **backend-for-frontend
+  (BFF)** intégré au module backend : le flow Authorization Code + PKCE s'exécute
+  côté serveur, les jetons OIDC restent côté serveur, et le navigateur ne
+  détient qu'un cookie de session opaque `HttpOnly` `Secure` `SameSite` — **aucun
+  jeton dans le navigateur**. Le backend valide les jetons et en dérive
+  l'identité et les rôles à partir des claims ; il n'implémente ni écran de
+  login, ni inscription, ni gestion de mot de passe. L'état de session est tenu
+  en mémoire (MVP mono-instance), remplaçable par un store externe (p. ex.
+  Redis) au scale-out. Un profil de test peut substituer un principal fondé sur
+  des en-têtes pour l'exécution locale et les tests. Tout le trafic en TLS.
 - **Garde-fou de persistance** : toutes les transitions d'état sont du SQL gardé
   (requête conditionnelle) écrit à la main, en une seule instruction (pas
   d'ORM / JPA) ; les changements de schéma sont des migrations versionnées.
+- **Transactions** : une frontière transactionnelle explicite par cas d'usage,
+  au niveau service ; les écritures gardées à une seule instruction sont le
+  mécanisme de concurrence — pas de verrous applicatifs, pas de boucles de retry
+  `SERIALIZABLE`.
+- **Déploiement des modèles de lecture** : les projections disponibilité et
+  tarif client sont des tables **de la même base et de la même application**,
+  tenues à jour par des écouteurs d'événements in-process (ou un outbox
+  transactionnel) — pas un service, un broker ni un datastore séparés.
 - **Montants** : unités mineures entières de bout en bout ; aucun flottant nulle
   part dans la tarification ou les paiements.
 - **Signalement des échecs** : tout échec connu est associé à un résultat typé et
@@ -487,10 +521,45 @@ particulier.
 - **Configuration** : connexion base de données, adresse de la passerelle,
   cadence de purge et toutes les valeurs de temporisation des pré-réservations
   sont configurables de l'extérieur.
+- **Observabilité** : logs structurés avec un identifiant de corrélation par
+  requête ; endpoints health / readiness ; métriques de base (Micrometer).
+  Suffisant pour exploiter — aucun produit d'APM imposé.
+- **Build et exécution** : un seul module Maven, un seul jar déployable, un seul
+  processus. Aucune hypothèse d'orchestration au-delà de « un conteneur et un
+  PostgreSQL ».
 - **Tests** : chaque cas d'usage teste unitairement le chemin nominal et chaque
   échec typé ; des tests d'intégration couvrent le SQL gardé et les projections
   contre un vrai PostgreSQL ; un test de concurrence prouve un seul gagnant par
   siège.
+- **Sécurité** — le service doit garantir, et une revue avant release doit
+  confirmer :
+  - **Accès aux objets (anti-IDOR, garanti)** : toute référence à une
+    réservation, une pré-réservation, un reçu est vérifiée contre l'identité
+    authentifiée (le `sub` du jeton) et/ou le rôle requis, dans la même
+    transaction que l'accès. Un identifiant valide appartenant à un autre client
+    ne renvoie jamais ses données (`403` / `404`, jamais le contenu).
+  - **Injection SQL** : 100 % du SQL est paramétré ; aucune requête n'est
+    construite par concaténation ou interpolation de données de requête ; un
+    fragment dynamique (colonne, ordre de tri) passe par une liste blanche codée
+    en dur.
+  - **Sur-affectation (mass assignment)** : les DTO de requête sont explicites ;
+    les champs contrôlés par le serveur (identité, prix, palier, statut,
+    horodatages, versions) ne sont jamais lus depuis le corps de la requête.
+  - **XSS** : toute sortie est encodée selon son contexte ; aucune donnée non
+    fiable n'est rendue en HTML / JS brut.
+  - **CSRF** : la session du BFF est portée par un cookie, donc toute requête
+    modifiant l'état exige une protection CSRF — jetons CSRF de Spring Security +
+    `SameSite` sur le cookie de session (`Strict` pour les endpoints sensibles).
+  - **En-têtes** : HSTS, `X-Content-Type-Options: nosniff`, refus d'iframe, CORS
+    minimal et explicite. La CSP stricte est une exigence de l'IHM (voir la
+    section Interfaces utilisateur).
+  - **Secrets** : jamais en code, en logs ni côté client ; injectés par
+    configuration uniquement.
+  - **Dépendances** : analyse des CVE connues au build ; aucune dépendance avec
+    une vulnérabilité critique non traitée à la release.
+  - **Compte base de données** : l'application se connecte avec un compte à
+    privilèges minimaux — DML sur ses propres tables, pas de DDL en runtime, pas
+    de superuser.
 
 ## Critères de succès
 
@@ -518,6 +587,11 @@ particulier.
   requête dont le jeton n'a pas ce rôle est refusée en « permission refusée » ;
   un jeton absent ou expiré est traité comme public (ou refusé, pour une
   opération protégée) — jamais comme une erreur serveur.
+- Une revue de sécurité avant release contre **OWASP ASVS niveau 1** (ou l'OWASP
+  Top 10) ne laisse aucun finding critique ouvert : un identifiant valide d'une
+  réservation d'autrui ne renvoie jamais ses données ; aucune entrée ne peut
+  altérer une requête SQL ; les en-têtes de sécurité (et la CSP côté IHM) sont
+  présents et stricts.
 - Aucun chemin d'échec connu ne renvoie une erreur serveur générique.
 
 ## Risques, hypothèses et questions ouvertes
