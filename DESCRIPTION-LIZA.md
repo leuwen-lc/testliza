@@ -11,6 +11,29 @@ Il fonctionne selon deux modes complémentaires :
 
 ---
 
+## Positionnement — autres systèmes multi-agents de développement
+
+Liza est dans un espace encombré (état des lieux début 2026, qui évolue vite). Les voisins se rangent en familles :
+
+- **Pipelines « entreprise logicielle » à rôles** — MetaGPT, ChatDev, gpt-pilot / Pythagora. Les cousins directs : décomposition en rôles (PM, architecte, dev, QA), du prompt vers le code.
+- **Agents SWE autonomes** (mono-agent, parfois sous-agents) — Devin, OpenHands (ex-OpenDevin), SWE-agent, Aider en mode architecte. Une tâche ou une issue, de bout en bout.
+- **Frameworks d'orchestration multi-agents généralistes** — AutoGen / Magentic-One, CrewAI, LangGraph, OpenAI Agents SDK, Google ADK. Des briques : on y assemble soi-même le pipeline.
+- **Produits hébergés « AI software engineer »** — Devin, Factory AI, Cosine (Genie), Sweep, Codegen. SaaS, périmètre issue → PR.
+- En contrepoint, **Agentless** défend l'idée qu'un pipeline structuré *localize → repair → validate* suffit, sans agents.
+
+Ce qui caractérise Liza n'est pas un trait isolé (gpt-pilot a une gouvernance pas-à-pas, MetaGPT a des rôles, OpenHands un sandbox solide) mais leur **combinaison**, et le parti-pris « ne pas faire confiance au prompt pour les invariants critiques » :
+
+- **enforcement mécanique** des invariants (hooks PreToolUse, state machine sous verrou, git-guard, gate pre-commit) plutôt que par le prompt ;
+- **revue adversariale liante** par un agent distinct, souvent d'un **autre fournisseur** (diversité de providers pour réduire les angles morts partagés) ; le doer ne s'auto-certifie jamais ;
+- **gouvernance humaine par sprint** (humain hors boucle d'exécution, dedans aux checkpoints, protocole d'évolution des specs) plutôt qu'une supervision continue ou une simple revue de PR finale ;
+- **orchestrateur agnostique qui pilote des CLIs agentiques externes** (Claude Code, Codex, Gemini) comme rôles — pas un harness LLM de plus ;
+- **isolation par worktree git** + merge vers la branche d'intégration réservé au superviseur ;
+- **circuit breaker systémique** (détection de patterns d'anomalies, classification de sévérité) au-delà des simples limites d'itération ;
+- **specs versionnées comme mémoire persistante** (vision → epics → stories → archi → plans) pour survivre aux redémarrages d'agents ;
+- **points d'entrée par altitude** (`general-objective` / `functional-spec` / `technical-spec`), là où la plupart partent d'une issue ou d'un prompt.
+
+---
+
 ## Postures de collaboration (mode Pairing)
 
 Les postures définissent la répartition des rôles entre l'humain et l'agent selon le contexte. Elles sont activables à la volée.
