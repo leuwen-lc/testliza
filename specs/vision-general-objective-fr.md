@@ -58,8 +58,10 @@ l'achat puis à l'annulation d'un billet :
 
 ## Hors périmètre
 
-- Le mécanisme d'authentification lui-même (on suppose que la plateforme fournit
-  une identité authentifiée et ses rôles).
+- L'administration de l'IdP et le cycle de vie des utilisateurs — comptes,
+  inscription, réinitialisation de mot de passe, vérification d'e-mail, politique
+  MFA, tout géré dans Keycloak — ainsi que le choix de la bibliothèque cliente
+  OIDC et du pattern de gestion des jetons.
 - La tarification par siège (les prix sont par palier uniquement), les remises,
   les codes promo, les commandes multi-sièges / panier, les listes d'attente,
   les remboursements partiels.
@@ -100,6 +102,10 @@ l'achat puis à l'annulation d'un billet :
   disponibilité de chaque siège et du nombre de places vendues par événement.
 - **Projection de tarif client** — une vue publique, à cohérence à terme, du
   dernier prix par (événement, palier).
+- **Identité client** — le sujet OIDC stable (claim `sub`) du principal
+  authentifié. Le système enregistre cette valeur comme le client sur les
+  pré-réservations, les réservations fermes et les paiements ; il ne stocke
+  aucun mot de passe ni autre secret de connexion.
 
 ## Règles métier et décisions produit
 
@@ -169,17 +175,303 @@ l'achat puis à l'annulation d'un billet :
 Chaque opération déclare exactement un niveau d'accès ; une opération sans niveau
 est une erreur de compilation, jamais une route publique silencieuse.
 
+Les niveaux d'accès sont dérivés du jeton OIDC validé : un rôle / groupe de realm
+Keycloak configuré donne **admin**, un autre **opérateur**, tout principal
+porteur d'un jeton valide est un **client authentifié**, et un jeton absent ou
+invalide est **public**. Quel nom de rôle accorde quel niveau relève de la
+configuration de déploiement, pas du code.
+
 - **Public** — statut de vente, vendabilité d'un siège, disponibilité d'un siège,
   nombre de places vendues, cotation de prix, tarif client.
 - **Client authentifié** — poser une pré-réservation, la consulter, acheter,
-  annuler ; uniquement pour l'identité et les réservations propres au client qui
-  agit.
+  annuler ; uniquement pour l'identité (le `sub` du jeton) et les réservations
+  propres au client qui agit.
 - **Organisateur (admin)** — toutes les écritures d'événement et de tarification.
 - **Opérateur** — la purge des pré-réservations.
+
+## Interfaces utilisateur (côté client)
+
+Périmètre de cette section : uniquement les surfaces utilisées par le **public**
+et par les **clients authentifiés**. Les consoles organisateur et opérateur sont
+un livrable distinct, non décrit ici. Ce qui suit est du comportement et des
+garanties, pas des composants, des routes, des maquettes ni un framework front
+particulier.
+
+### Surfaces et session
+
+- **Catalogue public** (sans compte) — vues en lecture seule de ce qui est en
+  vente.
+- **Espace client** (connecté) — pré-réserver, acheter, gérer ses réservations.
+- La navigation anonyme est toujours possible ; la connexion n'est requise que
+  pour pré-réserver, acheter ou annuler.
+- Se connecter = redirection vers la page de login hébergée par l'IdP
+  (Keycloak) ; l'application n'a aucun champ mot de passe et ne voit jamais les
+  identifiants du client. Elle revient avec un jeton validé d'où l'identité et le
+  rôle sont lus.
+- Navigation filtrée par rôle : un client connecté ne voit que les écrans client.
+  Toute tentative d'atteindre un écran organisateur/opérateur (y compris en
+  saisissant une URL) aboutit sur un écran sobre « vous n'avez pas accès ». Le
+  filtrage de l'IHM est du confort — l'API reste le point d'application.
+- Expiration du jeton / de la session en cours de tâche → le jeton est rafraîchi
+  silencieusement quand c'est possible ; sinon le client est renvoyé vers l'IdP
+  pour se reconnecter puis ramené là où il était, avec le contexte en cours
+  (événement/siège sélectionné, pré-réservation vivante) préservé s'il est encore
+  valide. Rien n'est perdu silencieusement.
+- Se déconnecter efface la session locale et met fin à la session au niveau de
+  l'IdP (single logout).
+
+### Écrans
+
+**1. Parcourir les événements et la disponibilité** (public)
+
+- Objectif : trouver un événement et voir si des sièges sont en vente et à quel
+  prix.
+- Affiché : les événements avec leur statut de vente et leur heure de mise en
+  vente ; la disponibilité par siège (disponible / vendu) et le nombre de places
+  vendues par événement ; le prix publié par palier.
+- Actions : ouvrir un événement ; depuis un siège, démarrer une pré-réservation
+  (invite à se connecter si besoin).
+- Fraîcheur : disponibilité, prix et compteurs proviennent de projections qui
+  peuvent être en retard. L'écran affiche un repère « à jour au <heure> » et un
+  rafraîchissement manuel, et ne présente jamais une donnée en retard comme
+  garantie — un siège affiché « disponible » peut encore être refusé au moment
+  de la pré-réservation, ce qui est géré proprement (écran 2).
+- États : chargement ; vide (aucun événement / aucun siège) ; un siège ou un
+  prix temporairement indisponible → montré comme tel, pas comme une page
+  d'erreur.
+
+**2. Pré-réserver un siège** (authentifié)
+
+- Objectif : poser une pré-réservation exclusive et limitée dans le temps sur un
+  siège choisi, pour pouvoir l'acheter sans concurrence.
+- Affiché : le siège (section / rang / numéro) et son palier ; l'événement.
+- Actions : confirmer la pré-réservation ; annuler.
+- En cas de succès : aller vers « Ma pré-réservation » (écran 3) avec un compte à
+  rebours en direct.
+- Saisies : rien qui identifie le client — l'identité vient de la session.
+- États :
+  - Siège pris à l'instant par quelqu'un d'autre, retiré de la vente, ou
+    événement qui a cessé de vendre → un message précis et non technique (« Ce
+    siège vient d'être pris » / « Ce siège n'est pas en vente » / « Cet événement
+    n'est plus en vente ») et un retour au parcours ; rien de réservé, rien de
+    débité.
+  - Le client détient déjà ce siège → la pré-réservation est rafraîchie et il
+    continue, sans erreur.
+  - Service indisponible → « Nous n'avons pas pu réserver ce siège », proposer de
+    réessayer.
+
+**3. Ma pré-réservation / checkout** (authentifié)
+
+- Objectif : suivre une pré-réservation vivante et la transformer en achat avant
+  qu'elle n'expire.
+- Affiché : le siège pré-réservé et l'événement ; un **compte à rebours en
+  direct** jusqu'à l'expiration, avec aussi l'heure d'expiration absolue ; le
+  plafond de durée de vie totale, pour qu'un client qui rafraîchit sans cesse
+  comprenne pourquoi cela finira par ne plus se rafraîchir ; le prix à payer une
+  fois chargé.
+- Actions : passer à l'achat ; libérer la pré-réservation maintenant (le siège
+  retourne en vente immédiatement) ; quitter (la pré-réservation suit son
+  cours).
+- États :
+  - Le compte à rebours atteint zéro à l'écran → l'achat est désactivé, un
+    message clair explique que la pré-réservation a expiré, et on propose au
+    client de retenter une pré-réservation du siège (peut échouer) ou de revenir
+    au parcours.
+  - Prix pas encore chargé → aucune action d'achat n'est proposée tant que le
+    prix faisant autorité n'est pas affiché.
+
+**4. Acheter ma place** (authentifié) — l'écran critique pour la confiance
+
+- Objectif : finaliser l'achat avec une clarté totale sur ce qui sera débité,
+  réversible jusqu'à une unique confirmation délibérée.
+- Affiché, avant tout débit :
+  - L'événement (nom, lieu, date/heure), le siège exact et son palier.
+  - Le **total exact** à débiter : un montant et une devise sans ambiguïté, dans
+    la devise de l'événement, formaté selon la locale — pas d'« estimation », pas
+    de frais révélé plus tard, jamais un entier d'unités mineures brut.
+  - Le temps restant sur la pré-réservation (en direct).
+  - Une phrase claire indiquant qu'**aucun montant n'est prélevé tant que
+    « Confirmer » n'est pas actionné**, et que le paiement est pris en charge par
+    le prestataire externe sur un canal sécurisé — l'application ne voit ni ne
+    stocke jamais de données de carte.
+- Saisies :
+  - Rien qui identifie le client — l'identité vient de la session ; l'écran
+    n'affiche ni ne demande jamais d'identifiant client.
+  - Aucun choix de palier — c'est celui du siège ; s'il semble faux, le client
+    annule, il ne peut pas le forcer.
+- Actions :
+  - **Confirmer l'achat** — la seule action qui débite. Le bouton nomme le
+    montant (« Payer 49,50 USD »), demande une pression délibérée (jamais
+    déclenchée par un Entrée involontaire sur un bouton focalisé par défaut), est
+    sûr en simple pression et au rechargement (aucun double débit sous
+    rafraîchissement, bouton retour ou nouvelle tentative réseau), et montre une
+    progression pendant le traitement avec une mention « ne fermez pas cette
+    page ».
+  - **Annuler** — toujours disponible, jamais destructif ; la pré-réservation est
+    laissée intacte pour le temps qu'il lui reste.
+- États, chacun indiquant **si un montant a été prélevé** :
+  - Prix indisponible pour le palier du siège → expliquer, ramener en arrière, ne
+    pas laisser l'achat se poursuivre. *(pas de débit)*
+  - Pré-réservation expirée avant la confirmation → achat désactivé, message,
+    proposer de re-réserver ou de revenir. *(pas de débit)*
+  - Siège devenu indisponible / événement qui a cessé de vendre au moment de la
+    confirmation → message précis, retour au parcours. *(pas de débit)*
+  - Paiement refusé → « Votre paiement a été refusé », siège et pré-réservation
+    inchangés, rappeler le montant exact, proposer de réessayer. *(pas de débit)*
+  - Client devenu inéligible (limite de réservations actives atteinte ailleurs) →
+    expliquer la limite. *(pas de débit)*
+  - Service en aval indisponible (réservation / paiement / tarification) → « Nous
+    n'avons pas pu finaliser votre achat, aucun montant n'a été prélevé »,
+    proposer de réessayer ; distinguer « rien ne s'est passé » de « issue
+    incertaine ». *(pas de débit)*
+  - Réseau perdu pendant la confirmation → l'écran ne présume pas l'échec ; il
+    indique que l'issue est inconnue et, au rechargement, montre l'état réel — un
+    achat abouti est montré comme fait, jamais reproposé. *(issue montrée
+    fidèlement)*
+- Après le succès :
+  - Afficher le **billet** et le **reçu** : le montant réellement débité (qui
+    doit être égal au montant affiché avant la confirmation — toute différence
+    est signalée, pas masquée), la devise, une référence de reçu et une référence
+    de réservation.
+  - Proposer de télécharger / enregistrer le reçu ; également accessible plus
+    tard depuis « Mes réservations ».
+  - Chemins clairs vers « Mes réservations » et vers l'achat d'une autre place.
+  - Indiquer explicitement que la réservation peut être annulée pour un
+    **remboursement intégral**, et où.
+
+**5. Mes réservations** (authentifié)
+
+- Objectif : voir ses réservations en cours et passées, récupérer un reçu,
+  annuler pour un remboursement.
+- Affiché : chaque réservation avec son événement, son siège, son statut
+  (confirmée / annulée), le montant payé, les références de reçu et de
+  réservation.
+- Actions : consulter / re-télécharger un reçu ; annuler une réservation
+  confirmée.
+- Flux d'annulation :
+  - Une étape de confirmation qui énonce la conséquence : le siège est libéré et
+    le montant intégral est remboursé sur le moyen de paiement d'origine.
+  - En cas de succès : afficher la confirmation de remboursement (montant,
+    référence) et le nouveau statut « annulée » de la réservation.
+  - Idempotent pour le client : annuler une réservation déjà annulée, ou
+    double-soumettre, ne produit jamais un second remboursement et n'affiche
+    jamais d'erreur inquiétante — cela affiche « déjà annulée » calmement.
+  - Service indisponible → « Nous n'avons pas pu annuler pour l'instant, rien n'a
+    changé », proposer de réessayer.
+
+### Décisions d'IHM transverses
+
+- **Fraîcheur** : les écrans alimentés par des projections en retard affichent
+  « à jour au <heure> » et un rafraîchissement manuel ; les étapes critiques pour
+  la correction (pré-réserver, acheter, annuler) agissent sur le résultat faisant
+  autorité et traitent la vue projetée comme un simple indice.
+- **Retour confirmé, pas optimiste** : les actions qui changent l'état montrent
+  un état « en cours » et ne signalent le succès qu'une fois l'API confirmée —
+  jamais un succès optimiste susceptible d'être repris.
+- **Comptes à rebours** : le compte à rebours de la pré-réservation est visible
+  sur tout écran où une pré-réservation vivante compte ; à l'expiration, l'IHM
+  change d'état plutôt que de laisser le client agir sur une pré-réservation
+  morte.
+- **Reçus** : disponibles immédiatement après l'achat et en permanence depuis
+  « Mes réservations » ; le client n'a jamais à garder un onglet ouvert pour
+  conserver une preuve.
+- **Aucun identifiant technique** n'est montré au client ni demandé (pas
+  d'identifiant client, pas d'identifiant de claim, pas de code de statut brut) ;
+  les références montrées (réservation, reçu) sont celles qu'un conseiller
+  support demanderait.
+- **Montants** : toujours dans la devise de l'événement, formatés selon la
+  locale, affichés avant le débit, jamais augmentés sans une nouvelle
+  confirmation explicite.
+
+### Exigences non fonctionnelles — IHM côté client
+
+- **Sécurité** :
+  - L'application ne détient aucun secret durable ni donnée de carte ; les
+    données de carte ne sont saisies que sur la surface sécurisée du prestataire
+    de paiement, jamais dans l'application.
+  - L'API est le seul point d'application des contrôles d'accès et des règles
+    métier ; les vérifications de l'IHM sont du confort et sont supposées
+    contournables.
+  - Les jetons OIDC sont conservés de manière à ne pas être accessibles à un
+    script injecté ; le rayon d'impact d'un jeton volé est borné par une durée de
+    vie d'access token courte et une validation côté serveur, et une
+    ré-authentification renforcée (step-up) avant l'étape d'achat est acceptable
+    si nécessaire.
+  - Tout le trafic en TLS ; l'application refuse de fonctionner en clair.
+  - Seules les données client dont un écran a besoin sont récupérées ; rien de
+    sensible n'est écrit dans un stockage local durable.
+- **Accessibilité — cible WCAG 2.1 AA** :
+  - Entièrement utilisable au clavier seul, dans un ordre logique, avec un
+    indicateur de focus visible.
+  - Chaque changement d'état (prix chargé, pré-réservation expirée, erreur,
+    succès) est annoncé aux technologies d'assistance et jamais véhiculé par la
+    seule couleur ou position.
+  - Le compte à rebours de la pré-réservation est annoncé à des seuils
+    significatifs, pas à chaque tic.
+  - Le contraste, l'agrandissement du texte à 200 % et la préférence
+    « mouvement réduit » sont respectés.
+  - Les champs de formulaire sont étiquetés (pas par un texte d'invite), et
+    chaque erreur est reliée à son champ.
+- **UX et résilience** :
+  - Aucun code d'erreur brut, aucune trace de pile, aucune page blanche — chaque
+    échec a un message clair et une étape suivante.
+  - Chaque état d'écran indique clairement si un montant a été prélevé : « non
+    prélevé », « prélevé — voici votre reçu », ou « issue inconnue — vérifiez Mes
+    réservations ».
+  - Les actions qui débitent ou qui sont destructives exigent une confirmation
+    délibérée et clairement libellée ; rien d'irréversible ne se produit sur une
+    seule frappe accidentelle.
+  - Les actions sont sûres à réessayer : rafraîchissement, bouton retour et
+    nouvelles tentatives réseau ne produisent jamais de double pré-réservation,
+    double débit ou double remboursement.
+  - Fonctionne sur un téléphone comme sur un poste de bureau ; le parcours
+    principal (parcourir → pré-réserver → acheter) est utilisable à une main sur
+    petit écran.
+  - Performance perçue : premier affichage utile rapide sur un téléphone milieu
+    de gamme via un réseau de classe 3G ; retour d'interaction sous ~100 ms ; un
+    appel d'API lent montre une progression sous ~1 s.
+  - Navigateurs supportés : versions majeures courante et précédente des
+    principaux navigateurs evergreen ; sinon un message clair « navigateur non
+    supporté ».
+  - Prêt pour l'internationalisation : tout le texte visible externalisé ; date,
+    heure et montants formatés selon la locale ; la mise en page tolère des
+    chaînes traduites plus longues.
+
+### Critères de succès — IHM côté client
+
+- Un visiteur anonyme peut trouver un événement, voir la disponibilité et le prix
+  réels, puis se connecter et atteindre l'écran de pré-réservation sans perdre sa
+  place.
+- Un client peut pré-réserver un siège, suivre le compte à rebours, l'acheter, et
+  voir un billet et un reçu dont le montant est égal à celui affiché avant
+  confirmation — sans jamais saisir d'identifiant technique.
+- Si un autre client prend le siège entre la consultation et l'achat, l'écran le
+  dit clairement et ramène à la sélection, sans rien débiter.
+- Un paiement refusé, une pré-réservation expirée et une panne d'un service en
+  aval produisent chacun un message clair indiquant qu'aucun montant n'a été
+  prélevé et proposant une étape suivante.
+- Perdre le réseau pendant la confirmation ne produit jamais de double débit ; au
+  rechargement, l'issue réelle est montrée.
+- Annuler une réservation affiche une confirmation de remboursement ; répéter
+  l'annulation affiche « déjà annulée » sans second remboursement.
+- L'ensemble du parcours d'achat est réalisable au clavier seul et passe un audit
+  WCAG 2.1 AA.
+- Un client connecté ne peut pas atteindre un écran organisateur ou opérateur ;
+  une tentative d'URL directe affiche « vous n'avez pas accès ».
+- Un jeton expiré est rafraîchi sans que le client s'en aperçoive quand c'est
+  possible ; quand une nouvelle connexion est nécessaire, le client revient sur
+  le même écran avec sa sélection et toute pré-réservation vivante intactes.
 
 ## Contraintes non fonctionnelles
 
 - **Runtime / pile** : Java 25 (LTS), Spring Boot 4+, PostgreSQL 16+.
+- **Authentification et identité** : déléguées à un IdP externe conforme OIDC
+  (Keycloak). Le service est un Relying Party / resource server OIDC — il valide
+  les jetons et en dérive l'identité et les rôles à partir des claims ; il
+  n'implémente ni écran de login, ni inscription, ni gestion de mot de passe, ni
+  stockage de secret de session. Un profil de test peut substituer un principal
+  fondé sur des en-têtes pour l'exécution locale et les tests. Tout le trafic en
+  TLS.
 - **Garde-fou de persistance** : toutes les transitions d'état sont du SQL gardé
   (requête conditionnelle) écrit à la main, en une seule instruction (pas
   d'ORM / JPA) ; les changements de schéma sont des migrations versionnées.
@@ -222,18 +514,22 @@ est une erreur de compilation, jamais une route publique silencieuse.
   expirée après celle-ci, et son siège redevient vendable après la purge.
 - Bloquer un siège refuse les pré-réservations et les achats sur ce siège ; le
   débloquer les rétablit.
+- Une requête dont le jeton OIDC porte le rôle requis est autorisée ; une
+  requête dont le jeton n'a pas ce rôle est refusée en « permission refusée » ;
+  un jeton absent ou expiré est traité comme public (ou refusé, pour une
+  opération protégée) — jamais comme une erreur serveur.
 - Aucun chemin d'échec connu ne renvoie une erreur serveur générique.
 
 ## Risques, hypothèses et questions ouvertes
 
-- **Hypothèse** : une identité authentifiée et un jeu de rôles sont fournis par
-  la plateforme ; ce service applique les niveaux d'accès mais n'implémente pas
-  la connexion.
-- **Question ouverte — liaison d'identité** : l'achat et l'annulation doivent
-  agir sur l'identité du client *authentifié*, non sur une valeur de client
-  passée dans le corps de la requête. La rétro-spécification source laisse ce
-  point ambigu ; la règle visée est « l'identité provient du principal
-  authentifié ». À trancher lors de l'écriture des stories.
+- **Hypothèse** : Keycloak (ou un autre fournisseur conforme OIDC) est exploité
+  séparément et disponible ; la configuration realm/client — redirect URIs, les
+  noms de rôle / groupe qui donnent admin et opérateur, les durées de vie des
+  jetons — est provisionnée au déploiement, pas par cette application.
+- **Tranché — liaison d'identité** : l'achat et l'annulation agissent sur
+  l'identité du principal authentifié (le `sub` du jeton OIDC), jamais sur une
+  valeur de client passée dans le corps de la requête. Ceci remplace la question
+  ouverte laissée par la rétro-spécification source.
 - **Question ouverte — cohérence palier / siège** : la règle visée est qu'un
   achat est toujours facturé au palier propre au siège. Une implémentation
   antérieure faisait confiance à un palier fourni par le client ; à régler lors

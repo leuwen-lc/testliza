@@ -48,8 +48,9 @@ purchase and cancellation:
 
 ## Out of scope
 
-- The authentication mechanism itself (assume the platform supplies an
-  authenticated identity and its roles).
+- The identity provider's own administration and user lifecycle — accounts,
+  registration, password reset, email verification, MFA policy, all managed in
+  Keycloak — and the choice of OIDC client library and token-handling pattern.
 - Seat-scoped pricing (prices are per tier only), discounts, promo codes,
   multi-seat / cart orders, waitlists, partial-value refunds.
 - Seat maps and rendering; venue modelling beyond a free-text venue name and
@@ -87,6 +88,9 @@ purchase and cancellation:
   seat's availability and per-event sold counts.
 - **Customer quote read model** — a public, eventually-consistent view of the
   latest price per (event, tier).
+- **Customer identity** — the stable OIDC subject (`sub` claim) of the
+  authenticated principal. The system records that value as the customer on
+  holds, bookings and payments; it stores no password or other login secret.
 
 ## Business rules & product decisions
 
@@ -150,16 +154,258 @@ purchase and cancellation:
 Every operation declares exactly one access level; an operation with none is a
 build error, never a silently public route.
 
+Access levels are derived from the validated OIDC token: a configured Keycloak
+realm role / group maps to **admin**, another to **operator**, any principal with
+a valid token is an **authenticated customer**, and a missing or invalid token is
+**public**. Which role name grants which level is deployment configuration, not
+code.
+
 - **Public** — sale status, seat sellability, seat availability, sold counts,
   price quote, customer quote.
 - **Authenticated customer** — acquire hold, check hold, buy, cancel; only for
-  the acting customer's own identity and bookings.
+  the acting customer's own identity (the token `sub`) and bookings.
 - **Organiser (admin)** — all event and pricing writes.
 - **Operator** — the hold sweep.
+
+## User interfaces (customer-facing)
+
+Scope of this section: only the surfaces used by the **public** and by
+**authenticated customers**. The organiser and operator consoles are a separate
+deliverable and are not described here. What follows is behaviour and guarantees,
+not components, routes, layouts or a specific frontend framework.
+
+### Surfaces & session
+
+- **Public catalogue** (no account) — read-only views of what is on sale.
+- **Customer app** (signed in) — holding, buying, and managing bookings.
+- Anonymous browsing is always available; signing in is required only to hold,
+  buy or cancel.
+- Signing in = redirect to the identity provider's own hosted login (Keycloak);
+  the app has no password field and never sees the customer's credentials. It
+  returns with a validated token from which identity and role are read.
+- Role-gated navigation: a signed-in customer sees only customer screens. Any
+  attempt to reach an organiser/operator screen (including by typing a URL) lands
+  on a plain "you do not have access" screen. UI gating is convenience only — the
+  API stays the enforcement point.
+- Token / session expiry mid-task → the token is refreshed silently where
+  possible; otherwise the customer is sent back to the provider to sign in again
+  and returned to where they were, with in-progress context (selected event/seat,
+  live hold) preserved if still valid. Nothing is silently lost.
+- Signing out clears the local session and ends the session at the identity
+  provider (single logout).
+
+### Screens
+
+**1. Browse events & availability** (public)
+
+- Purpose: find an event and see whether seats are on sale and at what price.
+- Shows: events with sale status and on-sale time; per-seat availability
+  (available / sold) and per-event sold counts; the published price per tier.
+- Actions: open an event; from a seat, start a hold (prompts sign-in if needed).
+- Freshness: availability, prices and sold counts come from projections that may
+  lag. The screen shows an "as of <time>" marker and a manual refresh, and never
+  presents lagging data as guaranteed — a seat shown "available" may still be
+  refused at hold time, and that is handled gracefully (screen 2).
+- States: loading; empty (no events / no seats); a seat or price temporarily
+  unavailable → shown as such, not as an error page.
+
+**2. Hold a seat** (authenticated)
+
+- Purpose: take a time-limited exclusive hold on a chosen seat so it can be
+  bought without contention.
+- Shows: the seat (section / row / number) and its tier; the event.
+- Actions: confirm the hold; cancel.
+- On success: go to "My hold" (screen 3) with a live countdown.
+- Inputs: nothing identifying the customer — identity is the session.
+- States:
+  - Seat just taken by someone else, withdrawn from sale, or the event stopped
+    selling → a specific, non-technical message ("This seat was just taken" /
+    "This seat is not for sale" / "This event is no longer on sale") and a route
+    back to browsing; nothing reserved, nothing charged.
+  - The customer already holds this seat → the hold is refreshed and they
+    continue, with no error.
+  - Service unavailable → "We could not hold this seat", offer retry.
+
+**3. My hold / checkout** (authenticated)
+
+- Purpose: watch a live hold and move it to purchase before it lapses.
+- Shows: the held seat and event; a **live countdown** to expiry with the
+  absolute expiry time also shown; the total lifetime cap, so a customer who
+  keeps refreshing understands why it will eventually stop refreshing; the price
+  to pay once loaded.
+- Actions: proceed to buy; release the hold now (returns the seat to sale
+  immediately); leave (the hold runs its course).
+- States:
+  - Countdown reaches zero on screen → buy is disabled, a clear message explains
+    the hold lapsed, and the customer is offered to try to hold the seat again
+    (may fail) or return to browsing.
+  - Price not yet loaded → no buy affordance is shown until the authoritative
+    price is displayed.
+
+**4. Buy my seat** (authenticated) — the confidence-critical screen
+
+- Purpose: complete the purchase with full clarity on what will be charged,
+  reversible until one deliberate confirm.
+- Shows, before any charge:
+  - Event (name, venue, date/time), the exact seat and its tier.
+  - The **exact total** to be charged: one unambiguous amount and currency, in
+    the event's currency with correct locale formatting — no "estimate", no fee
+    revealed later, never a raw minor-unit integer.
+  - Time remaining on the hold (live).
+  - A plain statement that **no money is taken until "Confirm" is pressed**, and
+    that payment is handled by the external provider over a secure channel — the
+    app never sees or stores card details.
+- Inputs:
+  - Nothing that identifies the customer — identity is the session; the screen
+    never shows or asks for a customer id.
+  - No tier choice — the tier is the seat's own; if it looks wrong the customer
+    cancels, they cannot override it.
+- Actions:
+  - **Confirm purchase** — the only charging action. The control names the amount
+    ("Pay 49.50 USD"), takes a deliberate press (never triggered by a stray
+    Enter on a default-focused button), is single-press-safe and reload-safe (no
+    double charge under refresh, back button or network retry), and shows
+    progress while in flight with a "do not close this page" note.
+  - **Cancel** — always available, never destructive; the hold is left intact for
+    its remaining life.
+- States, each stating **whether money was taken**:
+  - Price unavailable for the seat's tier → explain, route back, do not let the
+    purchase proceed. *(no charge)*
+  - Hold lapsed before confirm → buy disabled, message, offer to re-hold or go
+    back. *(no charge)*
+  - Seat no longer available / event stopped selling at confirm time → specific
+    message, return to browsing. *(no charge)*
+  - Payment declined → "Your payment was declined", seat and hold unaffected,
+    restate the exact amount, offer retry. *(no charge)*
+  - Customer became ineligible (reached the active-booking limit elsewhere) →
+    explain the limit. *(no charge)*
+  - Downstream service unavailable (booking / payment / pricing) → "We could not
+    complete your purchase, no money was taken", offer retry; distinguish
+    "nothing happened" from "outcome unclear". *(no charge)*
+  - Network lost mid-confirm → the screen does not assume failure; it says the
+    outcome is unknown and, on reload, shows the true state — a completed
+    purchase is shown as done, never offered again. *(outcome shown truthfully)*
+- After success:
+  - Show the **ticket** and the **receipt**: the amount actually charged (which
+    must equal the amount shown before confirm — any difference is surfaced, not
+    hidden), the currency, a receipt reference and a booking reference.
+  - Offer to download / save the receipt; also reachable later from "My
+    bookings".
+  - Clear paths to "My bookings" and to buy another seat.
+  - State plainly that the booking can be cancelled for a **full refund**, and
+    where.
+
+**5. My bookings** (authenticated)
+
+- Purpose: see current and past bookings, get a receipt again, cancel for a
+  refund.
+- Shows: each booking with its event, seat, status (confirmed / cancelled),
+  amount paid, receipt and booking references.
+- Actions: view / re-download a receipt; cancel a confirmed booking.
+- Cancellation flow:
+  - A confirmation step that states the consequence: the seat is released and the
+    full amount is refunded to the original payment method.
+  - On success: show the refund confirmation (amount, reference) and the
+    booking's new "cancelled" status.
+  - Idempotent to the customer: cancelling an already-cancelled booking, or
+    double-submitting, never produces a second refund and never shows a scary
+    error — it shows "already cancelled" calmly.
+  - Service unavailable → "We could not cancel right now, nothing changed", offer
+    retry.
+
+### Cross-cutting UI decisions
+
+- **Freshness**: screens fed by lagging projections show "as of <time>" plus a
+  manual refresh; correctness-critical steps (hold, buy, cancel) act on the
+  authoritative result and treat the projection view as a hint only.
+- **Confirmed feedback, not optimistic**: state-changing actions show a pending
+  state and report success only once the API has confirmed — never an optimistic
+  success that might be walked back.
+- **Countdowns**: the hold countdown is visible on every screen where a live hold
+  matters; when it lapses the UI changes state rather than letting the customer
+  act on a dead hold.
+- **Receipts**: available immediately after purchase and permanently from "My
+  bookings"; the customer never has to keep a tab open to keep proof.
+- **No technical identifiers** are shown to or requested from the customer (no
+  customer id, no claim id, no raw status codes); the references shown (booking,
+  receipt) are the ones a support agent would ask for.
+- **Money**: always the event's currency, locale-formatted, shown before the
+  charge, never increased without a fresh explicit confirm.
+
+### Non-functional requirements — customer-facing UI
+
+- **Security**:
+  - The app holds no long-lived secret and no card data; card details are entered
+    only on the payment provider's own secure surface, never in the app.
+  - The API is the sole enforcement point for access and business rules; UI
+    checks are convenience only and are assumed bypassable.
+  - OIDC tokens are held so they are not reachable by injected script; a stolen
+    token's blast radius is bounded by a short access-token lifetime and
+    server-side validation, and step-up re-authentication before the buy step is
+    acceptable if required.
+  - All traffic over TLS; the app refuses to run over plaintext.
+  - Only the customer data a screen needs is fetched; nothing sensitive is
+    written to durable local storage.
+- **Accessibility — target WCAG 2.1 AA**:
+  - Fully operable by keyboard alone, in a logical order, with a visible focus
+    indicator.
+  - Every state change (price loaded, hold lapsed, error, success) is announced
+    to assistive technology and never conveyed by colour or position alone.
+  - The hold countdown is announced at meaningful thresholds, not on every tick.
+  - Contrast, text resize to 200%, and reduced-motion preferences are respected.
+  - Form fields are labelled (not by placeholder text), and each error is tied to
+    its field.
+- **UX & resilience**:
+  - No raw error codes, stack traces or blank screens — every failure has a plain
+    message and a next step.
+  - Every screen state makes clear whether money was taken: "not taken",
+    "taken — here is your receipt", or "outcome unknown — check My bookings".
+  - Charging and destructive actions require a deliberate, clearly-labelled
+    confirmation; nothing irreversible happens on a single accidental keypress.
+  - Actions are safe to retry: refresh, back button and network retries never
+    double-hold, double-charge or double-refund.
+  - Works on a phone as well as a desktop; the primary flow (browse → hold →
+    buy) is usable one-handed on a small screen.
+  - Perceived performance: first meaningful view fast on a mid-range phone over a
+    3G-class network; interaction feedback within ~100 ms; a slow API call shows
+    progress within ~1 s.
+  - Supported browsers: current and previous major versions of the mainstream
+    evergreen browsers; a clear "unsupported browser" message otherwise.
+  - Internationalisation-ready: all user-facing text externalised; date, time and
+    money formatted per locale; layout tolerates longer translated strings.
+
+### Success criteria — customer-facing UI
+
+- An anonymous visitor can find an event, see real availability and price, then
+  sign in and reach the hold screen without losing their place.
+- A customer can hold a seat, watch the countdown, buy it, and see a ticket and a
+  receipt whose amount equals what was shown before confirming — without ever
+  typing a technical identifier.
+- If another customer takes the seat between viewing and buying, the screen says
+  so plainly and returns to selection, with nothing charged.
+- A declined payment, an expired hold and a downstream outage each produce a
+  clear message that states no money was taken and offers a next step.
+- Losing the network during confirmation never results in a double charge; on
+  reload the true outcome is shown.
+- Cancelling a booking shows a refund confirmation; repeating the cancellation
+  shows "already cancelled" with no second refund.
+- The whole purchase flow is completable by keyboard only and passes a WCAG 2.1
+  AA audit.
+- A signed-in customer cannot reach an organiser or operator screen; a direct URL
+  attempt shows "you do not have access".
+- An expired token is refreshed without the customer noticing where possible;
+  when a fresh sign-in is needed, the customer returns to the same screen with
+  their selection and any live hold intact.
 
 ## Non-functional constraints
 
 - **Runtime / stack**: Java 25 (LTS), Spring Boot 4+, PostgreSQL 16+.
+- **Authentication & identity**: delegated to an external OIDC provider
+  (Keycloak). The service is an OIDC relying party / resource server — it
+  validates tokens and derives identity and roles from their claims; it
+  implements no login screen, registration, password handling or session-secret
+  storage. A test profile may substitute a header-based principal for local runs
+  and tests. All traffic over TLS.
 - **Persistence guardrail**: all state transitions are hand-written,
   single-statement guarded SQL (no ORM / JPA); schema changes are
   version-controlled migrations.
@@ -195,17 +441,22 @@ build error, never a silently public route.
 - An unbought hold is reported stale near expiry, expired after it, and its seat
   becomes sellable again after the sweep.
 - Blocking a seat refuses holds and buys on it; releasing it restores them.
+- A request whose OIDC token carries the required role is allowed; one whose
+  token lacks that role is refused as permission-denied; a missing or expired
+  token is treated as public (or refused, for a protected operation) — never as a
+  server error.
 - No known failure path returns a generic server error.
 
 ## Risks, assumptions & open questions
 
-- **Assumption**: an authenticated identity and role set are supplied by the
-  platform; this service enforces access levels but does not implement sign-in.
-- **Open question — identity binding**: purchase and cancellation must act on the
-  *authenticated* customer's identity, not on a customer value passed in the
-  request body. The source retro-specification leaves this ambiguous; the
-  intended rule is "identity comes from the authenticated principal". Resolve
-  during story writing.
+- **Assumption**: Keycloak (or another OIDC-compliant provider) is operated
+  separately and available; realm and client configuration — redirect URIs, the
+  role / group names that map to admin and operator, token lifetimes — is
+  provisioned at deployment, not by this application.
+- **Resolved — identity binding**: purchase and cancellation act on the
+  authenticated principal's identity (the OIDC token `sub`), never on a customer
+  value passed in the request body. This supersedes the open question left by the
+  source retro-specification.
 - **Open question — tier / seat consistency**: the intended rule is that a
   purchase is always billed at the seat's own tier. An earlier implementation
   trusted a client-supplied tier; this must be settled during story writing.
