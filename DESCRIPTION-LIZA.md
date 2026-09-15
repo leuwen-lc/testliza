@@ -32,6 +32,18 @@ Ce qui caractérise Liza n'est pas un trait isolé (gpt-pilot a une gouvernance 
 - **specs versionnées comme mémoire persistante** (vision → epics → stories → archi → plans) pour survivre aux redémarrages d'agents ;
 - **points d'entrée par altitude** (`general-objective` / `functional-spec` / `technical-spec`), là où la plupart partent d'une issue ou d'un prompt.
 
+### CLI agentique vs appel API direct (LangGraph et assimilés) — un choix assumé, pas un défaut
+
+Le parti-pris « orchestrateur agnostique qui pilote des CLIs agentiques » (ci-dessus) mérite d'être creusé, car c'est l'endroit où l'idée « il faudrait passer par LangGraph et piloter l'API directement » est la plus tentante à première vue.
+
+Ce que Liza a déjà, indépendamment de la couche d'exécution d'une tâche : son propre graphe d'orchestration. `state.yaml` (tâches, dépendances, claims/locks, circuit breaker, priorités, historique) joue le rôle qu'un state graph LangGraph jouerait ailleurs — ce n'est donc pas « pas de framework », c'est un framework maison à ce niveau-là.
+
+Là où Liza diffère réellement, c'est à la granularité de l'exécution d'une tâche individuelle : chaque rôle est délégué à un process (`liza agent <rôle> --cli claude`) qui pilote une CLI agentique externe (Claude Code, Codex…) via ACP (`internal/agent/acpx_agent.go`), plutôt qu'une boucle d'outils écrite à la main autour de l'API Messages. Choix délibéré, pas un oubli : la CLI apporte gratuitement l'édition de fichiers, bash, git, la compaction de contexte sur des sessions de plusieurs heures, et surtout la facturation par abonnement plutôt que par token API — au prix, en contrepartie, d'une granularité de reprise grossière (une session ACP entière, pas un tool-call) et d'un mode de limitation différent (mur de session de plusieurs heures côté abonnement, plutôt que des 429 retriables par requête côté API à la carte).
+
+Incident concret qui illustre la limite : le run du 2026-09-14 a buté ~13h sur un flag `provider-quota-exhausted-claude`, posé à la détection du message de limite de session Claude Code, sur des rôles texte pur (`epic-planner`, `epic-plan-reviewer`, `us-writer` — lire des specs, écrire du markdown, sans édition multi-fichiers). Pour ces rôles-là spécifiquement, un backend API direct (SDK Agent, tool-use minimal, clé API) apporterait un vrai gain : checkpointing au tool-call près (reprise exacte, y compris d'une seule tâche isolée) et un rate-limiting par requête plutôt qu'un mur de session. Les rôles qui éditent réellement du code dans le repo (coder / reviewer de code) resteraient sur CLI — réimplémenter leur boucle d'outils en LangGraph reviendrait à refaire ce que Claude Code / Codex font déjà bien.
+
+Piste d'évolution retenue : hybride plutôt que migration complète — garder la state machine Go telle quelle, ajouter un backend API direct pour les rôles texte-pur, conserver le backend CLI/ACP pour les rôles codeurs. Non implémenté à ce jour ; à arbitrer si les murs de session deviennent récurrents.
+
 ---
 
 ## Postures de collaboration (mode Pairing)
